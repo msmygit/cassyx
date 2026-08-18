@@ -16,12 +16,18 @@ import type { ColumnKind, SchemaNodeKind } from '../api/types';
 /** Fully-qualified identity of a CQL object. Present on EVERY node, including keyspace nodes. */
 export interface SchemaIdentity {
   keyspace: string;
-  /** Table / view / type / function name. Absent only on keyspace nodes. */
+  /** Table name. Also set on column and index nodes, so a drop never has to guess the base table. */
   table?: string;
   /** Column name, for column nodes. */
   column?: string;
   /** Index name, for index nodes. */
   index?: string;
+  /** Materialized view name, for view nodes. */
+  view?: string;
+  /** Name for kinds that are not table-scoped: TYPE, FUNCTION, AGGREGATE, ROLE. */
+  name?: string;
+  /** Argument-type list for overloadable objects (UDF/UDA), e.g. `(double,int)`. */
+  signature?: string;
 }
 
 export interface SchemaNode {
@@ -148,11 +154,20 @@ export function quoteIdentifier(name: string): string {
   return `"${name.replace(/"/g, '""')}"`;
 }
 
-/** `keyspace.table`, correctly quoted. Built ONLY from an identity, never from tree position. */
+/**
+ * The object this identity names, whichever field carries it. Table-scoped kinds use `table`;
+ * views use `view`; UDTs, functions, aggregates and roles use `name`.
+ */
+export function objectName(identity: SchemaIdentity): string | undefined {
+  return identity.table ?? identity.view ?? identity.name;
+}
+
+/** `keyspace.object`, correctly quoted. Built ONLY from an identity, never from tree position. */
 export function qualifiedName(identity: SchemaIdentity): string {
   const keyspace = quoteIdentifier(identity.keyspace);
-  if (!identity.table) return keyspace;
-  return `${keyspace}.${quoteIdentifier(identity.table)}`;
+  const object = objectName(identity);
+  if (!object) return keyspace;
+  return `${keyspace}.${quoteIdentifier(object)}`;
 }
 
 /** Stable node id. Kind is part of it so a table and a UDT of the same name never collide. */
@@ -160,9 +175,10 @@ export function nodeId(kind: SchemaNodeKind, identity: SchemaIdentity): string {
   return [
     kind,
     identity.keyspace,
-    identity.table ?? '',
+    identity.table ?? identity.view ?? identity.name ?? '',
     identity.column ?? '',
     identity.index ?? '',
+    identity.signature ?? '',
   ].join('::');
 }
 

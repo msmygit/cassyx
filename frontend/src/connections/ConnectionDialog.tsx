@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import Alert from '@mui/material/Alert';
 import Button from '@mui/material/Button';
+import CircularProgress from '@mui/material/CircularProgress';
 import Dialog from '@mui/material/Dialog';
 import DialogActions from '@mui/material/DialogActions';
 import DialogContent from '@mui/material/DialogContent';
@@ -16,17 +17,30 @@ import type { AstraApi } from './astraApi';
 import { SecretField } from './SecretField';
 import {
   emptyConnectionForm,
+  redactSecrets,
+  toConnectionRequest,
   validateConnection,
   type ConnectionFormState,
   type ValidationErrors,
 } from './connectionModel';
+import { saveConnection, type SaveConnectionResult } from './saveConnection';
+import { testConnection, type ConnectionTestResult } from './connectionsApi';
 
 export interface ConnectionDialogProps {
   open: boolean;
   onClose: () => void;
+  /**
+   * Override the default persistence. Left unset, the dialog talks to the real API: create (or
+   * update), attach the secure connect bundle, then connect.
+   */
   onSave?: (form: ConnectionFormState, bundleFile: File | null) => void | Promise<void>;
+  /** Present when editing an existing connection. */
+  connectionId?: string;
   initial?: ConnectionFormState;
   astraApi?: AstraApi;
+  /** Injectable for tests; defaults to the real endpoints. */
+  saveFn?: typeof saveConnection;
+  testFn?: typeof testConnection;
 }
 
 const MODES: { value: ConnectionMode; label: string }[] = [
@@ -44,22 +58,77 @@ export function ConnectionDialog({
   open,
   onClose,
   onSave,
+  connectionId,
   initial,
   astraApi,
+  saveFn = saveConnection,
+  testFn = testConnection,
 }: ConnectionDialogProps) {
   const [form, setForm] = useState<ConnectionFormState>(() => initial ?? emptyConnectionForm());
   const [bundleFile, setBundleFile] = useState<File | null>(null);
   const [submitted, setSubmitted] = useState(false);
+  const [busy, setBusy] = useState<'saving' | 'testing' | null>(null);
+  const [serverError, setServerError] = useState<string | null>(null);
+  const [testResult, setTestResult] = useState<ConnectionTestResult | null>(null);
 
   const errors: ValidationErrors = useMemo(() => validateConnection(form), [form]);
   const visibleErrors = submitted ? errors : {};
   const valid = Object.keys(errors).length === 0;
 
+  /**
+   * SECURITY: server messages are pushed through `redactSecrets` before display. The backend does
+   * not echo credentials, but the prior art rendered the Astra token in plaintext and this is the
+   * path that would reintroduce it.
+   */
+  const reportError = (error: unknown, fallback: string) => {
+    const message = error instanceof Error && error.message ? error.message : fallback;
+    setServerError(redactSecrets(message));
+  };
+
   const handleSave = async () => {
     setSubmitted(true);
+    setServerError(null);
     if (!valid) return;
-    await onSave?.(form, bundleFile);
-    onClose();
+    setBusy('saving');
+    try {
+      if (onSave) {
+        await onSave(form, bundleFile);
+      } else {
+        const result: SaveConnectionResult = await saveFn({
+          form,
+          connectionId,
+          bundleFile,
+          connect: true,
+        });
+        void result;
+      }
+      onClose();
+    } catch (error) {
+      reportError(error, 'Could not save the connection.');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  /**
+   * Probe without saving. A failed probe still resolves — `success` carries the answer — so the
+   * diagnostic reaches the user instead of being swallowed by generic error handling.
+   */
+  const handleTest = async () => {
+    setSubmitted(true);
+    setServerError(null);
+    setTestResult(null);
+    if (!valid) return;
+    setBusy('testing');
+    try {
+      setTestResult(
+        await testFn(connectionId ? { connectionId } : { connection: toConnectionRequest(form) }),
+      );
+    } catch (error) {
+      reportError(error, 'Could not reach the cassyx server.');
+    } finally {
+      setBusy(null);
+    }
   };
 
   return (
@@ -161,6 +230,7 @@ export function ConnectionDialog({
               onChange={(astra) => setForm({ ...form, astra })}
               errors={visibleErrors}
               onBundleFile={setBundleFile}
+              {...(connectionId ? { connectionId } : {})}
               {...(astraApi ? { api: astraApi } : {})}
             />
           )}
@@ -195,11 +265,50 @@ export function ConnectionDialog({
           {submitted && !valid && (
             <Alert severity="warning">Fix the highlighted fields before saving.</Alert>
           )}
+
+          {serverError && (
+            <Alert severity="error" data-testid="connection-error">
+              {serverError}
+            </Alert>
+          )}
+
+          {testResult && (
+            <Alert
+              severity={testResult.success ? 'success' : 'error'}
+              data-testid="connection-test-result"
+            >
+              {testResult.success
+                ? `Connected to ${testResult.clusterName ?? 'the cluster'} (${
+                    testResult.releaseVersion ?? 'unknown version'
+                  }) in ${testResult.elapsedMillis} ms.`
+                : redactSecrets(
+                    testResult.problem?.detail ??
+                      testResult.problem?.title ??
+                      'The cluster could not be reached.',
+                  )}
+            </Alert>
+          )}
         </Stack>
       </DialogContent>
       <DialogActions>
-        <Button onClick={onClose}>Cancel</Button>
-        <Button variant="contained" onClick={() => void handleSave()} data-testid="connection-save">
+        <Button onClick={onClose} disabled={busy !== null}>
+          Cancel
+        </Button>
+        <Button
+          onClick={() => void handleTest()}
+          disabled={busy !== null}
+          startIcon={busy === 'testing' ? <CircularProgress size={14} /> : undefined}
+          data-testid="connection-test"
+        >
+          Test connection
+        </Button>
+        <Button
+          variant="contained"
+          onClick={() => void handleSave()}
+          disabled={busy !== null}
+          startIcon={busy === 'saving' ? <CircularProgress size={14} /> : undefined}
+          data-testid="connection-save"
+        >
           Save &amp; connect
         </Button>
       </DialogActions>

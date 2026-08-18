@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  DEFAULT_REQUEST_TIMEOUT_MS,
   domainsForRegion,
   emptyConnectionForm,
   isConnectableDatabase,
@@ -8,6 +9,7 @@ import {
   parseContactPoints,
   redactSecrets,
   regionsFromBundles,
+  toConnectionRequest,
   validateAstra,
   validateConnection,
 } from './connectionModel';
@@ -216,5 +218,112 @@ describe('bundle option projections', () => {
   it('knows which database statuses are connectable', () => {
     expect(isConnectableDatabase('ACTIVE')).toBe(true);
     expect(isConnectableDatabase('HIBERNATED')).toBe(false);
+  });
+});
+
+describe('toConnectionRequest', () => {
+  it('maps the Cassandra form onto the contract shape', () => {
+    const form = emptyConnectionForm();
+    form.name = '  local-dev  ';
+    form.cassandra.contactPoints = '10.0.0.1:9042, 10.0.0.2';
+    form.cassandra.localDatacenter = 'datacenter1';
+    form.cassandra.username = 'cassandra';
+    form.cassandra.password = 'hunter2';
+    form.cassandra.protocolVersion = 'v5';
+
+    expect(toConnectionRequest(form)).toEqual({
+      name: 'local-dev',
+      mode: 'CASSANDRA',
+      requestTimeoutMillis: DEFAULT_REQUEST_TIMEOUT_MS,
+      contactPoints: [
+        { host: '10.0.0.1', port: 9042 },
+        { host: '10.0.0.2', port: 9042 },
+      ],
+      localDatacenter: 'datacenter1',
+      username: 'cassandra',
+      password: 'hunter2',
+      protocolVersion: 'V5',
+    });
+  });
+
+  it('drops an unrecognised protocol version rather than sending it', () => {
+    const form = emptyConnectionForm();
+    form.name = 'x';
+    form.cassandra.protocolVersion = 'V9';
+
+    expect(toConnectionRequest(form).protocolVersion).toBeUndefined();
+  });
+
+  /**
+   * `undefined` means "preserve the stored value"; `''` means "clear it". The browser never has the
+   * stored secret, so an untouched edit form must send `undefined` or it would wipe the password.
+   */
+  it('omits an empty secret instead of sending an empty string', () => {
+    const form = emptyConnectionForm();
+    form.name = 'x';
+    form.cassandra.password = '';
+
+    expect(toConnectionRequest(form)).not.toHaveProperty('password', '');
+    expect(toConnectionRequest(form).password).toBeUndefined();
+  });
+
+  it('maps the Astra form, keeping region and scbType as separate inputs', () => {
+    const form = emptyConnectionForm();
+    form.name = 'prod-eu';
+    form.mode = 'ASTRA';
+    form.astra.astraToken = 'AstraCS:abc:def';
+    form.astra.databaseId = 'f9a1b3c4-1111-2222-3333-444455556666';
+    form.astra.region = 'us-east1';
+    form.astra.keyspace = 'demo';
+
+    const request = toConnectionRequest(form);
+
+    expect(request.mode).toBe('ASTRA');
+    expect(request.defaultKeyspace).toBe('demo');
+    expect(request.astra).toEqual({
+      astraToken: 'AstraCS:abc:def',
+      scbMode: 'AUTO_DOWNLOAD',
+      databaseId: 'f9a1b3c4-1111-2222-3333-444455556666',
+      region: 'us-east1',
+      scbType: 'default',
+      domain: undefined,
+      scbPath: undefined,
+    });
+  });
+
+  it('sends a domain only for a custom bundle type, which the contract requires', () => {
+    const form = emptyConnectionForm();
+    form.name = 'x';
+    form.mode = 'ASTRA';
+    form.astra.customDomain = 'cassandra.example.com';
+
+    expect(toConnectionRequest(form).astra?.domain).toBeUndefined();
+
+    form.astra.scbType = 'custom';
+    expect(toConnectionRequest(form).astra?.domain).toBe('cassandra.example.com');
+  });
+
+  it('sends scbPath only in PATH mode', () => {
+    const form = emptyConnectionForm();
+    form.name = 'x';
+    form.mode = 'ASTRA';
+    form.astra.bundlePath = '/etc/cassyx/scb/prod.zip';
+
+    expect(toConnectionRequest(form).astra?.scbPath).toBeUndefined();
+
+    form.astra.acquisitionMode = 'PATH';
+    expect(toConnectionRequest(form).astra?.scbPath).toBe('/etc/cassyx/scb/prod.zip');
+  });
+
+  it('passes the HOCON document through untouched in advanced mode', () => {
+    const form = emptyConnectionForm();
+    form.name = 'exotic';
+    form.mode = 'ADVANCED';
+    form.advanced.applicationConf = 'datastax-java-driver { basic.contact-points = [] }';
+
+    const request = toConnectionRequest(form);
+
+    expect(request.advancedConfig).toBe('datastax-java-driver { basic.contact-points = [] }');
+    expect(request.contactPoints).toBeUndefined();
   });
 });

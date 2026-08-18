@@ -1,0 +1,32 @@
+# Keeps the backend build context small and secrets out of the image.
+# The build stage copies POMs before sources for layer caching, so anything that would
+# invalidate that cache without affecting the build is excluded here.
+
+target/
+*/target/
+**/target
+
+# Local Maven state
+.mvn/wrapper/maven-wrapper.jar
+mvnw
+mvnw.cmd
+
+# Never ship secrets or local config into a build context
+.env
+.env.*
+!.env.example
+**/*.p12
+**/*.jks
+**/*secure-connect*.zip
+
+# Editor / OS noise
+.idea/
+*.iml
+.vscode/
+.DS_Store
+
+# Docs and reports are not build inputs
+**/README.md
+**/site/
+**/pit-reports/
+**/dependency-check-report.*

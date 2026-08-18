@@ -60,6 +60,8 @@
     <checkstyle.version>10.21.1</checkstyle.version>
     <surefire.version>3.5.2</surefire.version>
     <failsafe.version>3.5.2</failsafe.version>
+    <!-- Minimum Engine API Docker 29 accepts; see the surefire/failsafe config below. -->
+    <docker.api.version>1.44</docker.api.version>
 
     <checkstyle.config.path>${project.basedir}/config/checkstyle.xml</checkstyle.config.path>
 
@@ -208,15 +210,35 @@
   <build>
     <pluginManagement>
       <plugins>
+        <!--
+          Docker 29's daemon rejects Engine API versions below 1.44, but the docker-java
+          client bundled with Testcontainers 1.21 negotiates lower and fails with the
+          thoroughly misleading "Could not find a valid Docker environment" - which reads
+          like Docker is not installed rather than a version handshake failure.
+
+          Pinning api.version here rather than leaving it to each module: three separate
+          workstreams hit this independently and each invented its own local workaround,
+          and it would otherwise fail the CI `integration` job for everyone.
+        -->
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>
           <artifactId>maven-surefire-plugin</artifactId>
           <version>${surefire.version}</version>
+          <configuration>
+            <systemPropertyVariables>
+              <api.version>${docker.api.version}</api.version>
+            </systemPropertyVariables>
+          </configuration>
         </plugin>
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>
           <artifactId>maven-failsafe-plugin</artifactId>
           <version>${failsafe.version}</version>
+          <configuration>
+            <systemPropertyVariables>
+              <api.version>${docker.api.version}</api.version>
+            </systemPropertyVariables>
+          </configuration>
         </plugin>
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>

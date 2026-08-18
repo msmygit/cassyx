@@ -124,6 +124,27 @@ jobs:
           retention-days: 7
 
   # ---------------------------------------------------------------------------
+  # Boots the real stack and asserts it serves. Deliberately separate from e2e:
+  # Phase 0 shipped two defects (an invalid H2 URL, and an eagerly-built Ed25519
+  # verifier that threw on the shipped placeholder key) that every unit test
+  # passed and that killed the app on first boot. Playwright would have caught
+  # them only as an opaque browser timeout at the end of a 45-minute job; this
+  # fails in a couple of minutes naming the actual endpoint.
+  smoke:
+    name: smoke (stack boots and serves)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - run: cp .env.example .env
+      - name: Pre-pull Cassandra 5.x
+        run: docker pull cassandra:5.0
+      - name: make smoke
+        run: make smoke
+      - name: Stack logs on failure
+        if: failure()
+        run: docker compose logs --tail=200 || true
+
   e2e:
     name: e2e (Playwright)
     runs-on: ubuntu-latest
@@ -162,10 +183,16 @@ jobs:
         with:
           fetch-depth: 0   # gitleaks history scan
       - run: cp .env.example .env
+      - name: Warn when NVD_API_KEY is absent
+        if: ${{ !secrets.NVD_API_KEY }}
+        run: |
+          echo "::warning title=OWASP Dependency-Check skipped::NVD_API_KEY repo secret is not set, so CVE scanning is SKIPPED (gitleaks and npm audit still run). The NVD API rejects keyless clients outright ('Invalid API Key, length of 0 too short'), so running it would fail the build without producing any security signal. Get a free key at https://nvd.nist.gov/developers/request-an-api-key and add it under Settings > Secrets and variables > Actions as NVD_API_KEY."
       - name: make security
         run: make security
         env:
-          # Optional, but raises the OWASP DC NVD API rate limit substantially.
+          # When absent, `make security` skips Dependency-Check with a warning rather than failing
+          # the build — a missing credential is a configuration gap, not a vulnerability finding.
+          # Release builds should set SECURITY_STRICT=1 to turn that skip back into a hard failure.
           NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
       - name: Upload dependency-check report
         if: always()

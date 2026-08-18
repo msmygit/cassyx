@@ -7861,7 +7861,7 @@ components:
           example: "**/*.csv"
         fileNameFormat:
           type: string
-          example: "output-%0,6d.csv"
+          example: "output-%06d.csv"
         recursive:
           type: boolean
           example: false
@@ -7942,7 +7942,7 @@ components:
           example: "**/*.json"
         fileNameFormat:
           type: string
-          example: "output-%0,6d.json"
+          example: "output-%06d.json"
         mode:
           type: string
           enum: [MULTI_DOCUMENT, SINGLE_DOCUMENT]
@@ -8011,7 +8011,10 @@ components:
           example: true
         allowExtraFields:
           type: boolean
-          example: false
+          description: >-
+            Upstream DSBulk default is `true`. Examples must match the shipped defaults —
+            a wrong example gets copied into implementations as if it were one.
+          example: true
         allowMissingFields:
           type: boolean
           example: false
@@ -8336,7 +8339,7 @@ components:
           example: 1
         retryPolicyClass:
           type: string
-          example: com.datastax.oss.dsbulk.workflow.api.utils.MultipleRetryPolicy
+          example: com.datastax.oss.dsbulk.workflow.commons.policies.retry.MultipleRetryPolicy
         maxRetries:
           type: integer
           example: 10
@@ -8391,7 +8394,7 @@ components:
           type: array
           items:
             type: string
-            enum: [global, ranges, hosts, partitions, biggest-partitions]
+            enum: [global, ranges, hosts, partitions]
           example: [global, ranges, hosts, partitions]
         numPartitions:
           type: integer
@@ -8725,7 +8728,7 @@ components:
           description: Shorthand for `dsbulkSettings.stats.modes`.
           items:
             type: string
-            enum: [global, ranges, hosts, partitions, biggest-partitions]
+            enum: [global, ranges, hosts, partitions]
           example: [global, ranges, hosts, partitions]
         topPartitions:
           type: integer

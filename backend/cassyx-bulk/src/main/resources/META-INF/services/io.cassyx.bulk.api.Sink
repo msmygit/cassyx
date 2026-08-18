@@ -1,1 +1,3 @@
 io.cassyx.bulk.impl.FileSink
+io.cassyx.bulk.impl.HttpSink
+io.cassyx.bulk.impl.S3Sink

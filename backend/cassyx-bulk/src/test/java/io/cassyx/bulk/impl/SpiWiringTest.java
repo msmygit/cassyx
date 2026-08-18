@@ -26,8 +26,12 @@ class SpiWiringTest {
   @Test
   void encoderIsDiscoveredByFormat() {
     assertThat(BulkFactory.encoder("CSV")).isInstanceOf(CsvEncoder.class);
-    assertThat(BulkFactory.encoders()).extracting(Encoder::format).contains("csv");
-    assertThatThrownBy(() -> BulkFactory.encoder("parquet"))
+    // The full plan section 5.2 format list is registered, so the "unknown format" case now needs
+    // a genuinely unregistered one.
+    assertThat(BulkFactory.encoders())
+        .extracting(Encoder::format)
+        .contains("csv", "json", "jsonl", "parquet", "xml", "xlsx");
+    assertThatThrownBy(() -> BulkFactory.encoder("avro"))
         .isInstanceOf(IllegalArgumentException.class);
   }
 
@@ -35,8 +39,8 @@ class SpiWiringTest {
   void sinkIsDiscoveredByScheme() {
     assertThat(BulkFactory.sink("file")).isInstanceOf(FileSink.class);
     assertThat(BulkFactory.sinkForTarget("/tmp/out")).isInstanceOf(FileSink.class);
-    assertThat(BulkFactory.sinks()).extracting(Sink::scheme).contains("file");
-    assertThatThrownBy(() -> BulkFactory.sink("s3")).isInstanceOf(IllegalArgumentException.class);
+    assertThat(BulkFactory.sinks()).extracting(Sink::scheme).contains("file", "http", "s3");
+    assertThatThrownBy(() -> BulkFactory.sink("ftp")).isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test

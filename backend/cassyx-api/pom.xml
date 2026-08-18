@@ -115,6 +115,11 @@
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-failsafe-plugin</artifactId>
         <configuration>
+          <!-- Failsafe defaults to the module's ARTIFACT, and spring-boot:repackage has by then
+               rewritten that jar into a fat jar whose classes live under BOOT-INF/classes. An
+               integration test that touches any cassyx-api class then dies during discovery with
+               NoClassDefFoundError. Point Failsafe at the plain output directory instead. -->
+          <classesDirectory>${project.build.outputDirectory}</classesDirectory>
           <systemPropertyVariables>
             <!-- Opt-in; pass -Dcassyx.it=true to run against the shared Cassandra container. -->
             <cassyx.it>${cassyx.it}</cassyx.it>

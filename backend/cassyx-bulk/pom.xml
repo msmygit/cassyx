@@ -16,6 +16,14 @@
     <checkstyle.config.path>${project.parent.basedir}/config/checkstyle.xml</checkstyle.config.path>
     <!-- section 11.1 gate: 85% + completeness property tests. -->
     <cassyx.coverage.line>0.85</cassyx.coverage.line>
+    <!-- Workstream D: this module has real logic now, so the JaCoCo check is ENFORCED here even
+         while the rest of the reactor is still on the Phase 0 skip (plan section 11.1). -->
+    <cassyx.coverage.skip>false</cassyx.coverage.skip>
+
+    <poi.version>5.4.1</poi.version>
+    <parquet.version>1.15.1</parquet.version>
+    <hadoop.version>3.4.1</hadoop.version>
+    <awssdk.version>2.31.30</awssdk.version>
   </properties>
 
   <dependencies>
@@ -27,6 +35,144 @@
       <groupId>org.slf4j</groupId>
       <artifactId>slf4j-api</artifactId>
     </dependency>
+
+    <!-- ===== Encoder SPI implementations (plan section 5.2) ===== -->
+
+    <!-- JSON / JSONL. -->
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.fasterxml.jackson.datatype</groupId>
+      <artifactId>jackson-datatype-jsr310</artifactId>
+    </dependency>
+
+    <!-- Excel (.xlsx). SXSSF streaming only - see XlsxEncoder. -->
+    <dependency>
+      <groupId>org.apache.poi</groupId>
+      <artifactId>poi-ooxml</artifactId>
+      <version>${poi.version}</version>
+    </dependency>
+
+    <!-- Parquet. parquet-hadoop hard-references org.apache.hadoop.conf.Configuration, so
+         hadoop-common comes along; everything the writer path does not touch (the RPC stack,
+         Kerberos, the embedded Jetty, ZooKeeper/Curator) is excluded to keep the jar count and
+         the CVE surface down. Only Configuration + LocalFileSystem are actually used. -->
+    <dependency>
+      <groupId>org.apache.parquet</groupId>
+      <artifactId>parquet-avro</artifactId>
+      <version>${parquet.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.hadoop</groupId>
+      <artifactId>hadoop-common</artifactId>
+      <version>${hadoop.version}</version>
+      <exclusions>
+        <!-- hadoop-auth is NOT excluded and must not be: HadoopOutputFile.fromPath reaches
+             FileSystem$Cache$Key -> UserGroupInformation -> org.apache.hadoop.util.PlatformName,
+             which lives in hadoop-auth. Excluding it makes every Parquet unload die with a
+             NoClassDefFoundError at open() time, in the shipped image as well as in tests. -->
+        <exclusion>
+          <groupId>org.apache.curator</groupId>
+          <artifactId>*</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>org.apache.zookeeper</groupId>
+          <artifactId>*</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>org.eclipse.jetty</groupId>
+          <artifactId>*</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>com.sun.jersey</groupId>
+          <artifactId>*</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>org.apache.kerby</groupId>
+          <artifactId>*</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>javax.servlet</groupId>
+          <artifactId>*</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>javax.servlet.jsp</groupId>
+          <artifactId>*</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>log4j</groupId>
+          <artifactId>*</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>org.slf4j</groupId>
+          <artifactId>slf4j-reload4j</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>ch.qos.reload4j</groupId>
+          <artifactId>*</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+
+    <!-- ===== Sink SPI implementations (plan section 5.2) ===== -->
+    <!-- S3. Multipart via AsyncRequestBody.forBlockingOutputStream - see S3Sink. -->
+    <dependency>
+      <groupId>software.amazon.awssdk</groupId>
+      <artifactId>s3</artifactId>
+      <version>${awssdk.version}</version>
+    </dependency>
+
+    <!-- Test only: ParquetReadOptions$Builder touches hadoop-mapreduce's FileInputFormat, so the
+         READ side of the Parquet round-trip test needs it. The writer path cassyx ships does not,
+         which is why this is not a compile dependency. -->
+    <dependency>
+      <groupId>org.apache.hadoop</groupId>
+      <artifactId>hadoop-mapreduce-client-core</artifactId>
+      <version>${hadoop.version}</version>
+      <scope>test</scope>
+      <exclusions>
+        <exclusion>
+          <groupId>org.apache.hadoop</groupId>
+          <artifactId>hadoop-hdfs-client</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>org.slf4j</groupId>
+          <artifactId>slf4j-reload4j</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+    <dependency>
+      <groupId>org.mockito</groupId>
+      <artifactId>mockito-core</artifactId>
+      <version>${mockito.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>ch.qos.logback</groupId>
+      <artifactId>logback-classic</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <!-- The shared Testcontainers Cassandra 5.x singleton (plan section 11.2). Integration tests
+         extend io.cassyx.core.testsupport.IntegrationTestBase; they never start their own. -->
+    <dependency>
+      <groupId>io.cassyx</groupId>
+      <artifactId>cassyx-core</artifactId>
+      <type>test-jar</type>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>cassandra</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+
     <!-- NOTE (plan section 5.3): com.datastax.oss:dsbulk-runner is deliberately NOT declared here.
          DSBulk's application.conf collides with Spring/Typesafe Config on a shared classpath, so
          the runner is executed OUT OF PROCESS from the distribution shipped in the Docker image
@@ -34,6 +180,29 @@
          The 1.11.1 pin and the CVE-2026-24400 / CVE-2023-6378 overrides live in the parent
          <dependencyManagement> so they apply the moment anyone does add it. -->
   </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-failsafe-plugin</artifactId>
+        <configuration>
+          <systemPropertyVariables>
+            <!-- Opt-in; pass -Dcassyx.it=true to run against the shared Cassandra container. -->
+            <cassyx.it>${cassyx.it}</cassyx.it>
+          </systemPropertyVariables>
+        </configuration>
+        <executions>
+          <execution>
+            <goals>
+              <goal>integration-test</goal>
+              <goal>verify</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
 
   <profiles>
     <profile>
