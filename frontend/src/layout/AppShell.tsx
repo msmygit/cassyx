@@ -6,21 +6,43 @@ import Typography from '@mui/material/Typography';
 import AccountTreeRoundedIcon from '@mui/icons-material/AccountTreeRounded';
 import PlaylistPlayRoundedIcon from '@mui/icons-material/PlaylistPlayRounded';
 import ScatterPlotRoundedIcon from '@mui/icons-material/ScatterPlotRounded';
+import QueryStatsRoundedIcon from '@mui/icons-material/QueryStatsRounded';
+import UploadFileRoundedIcon from '@mui/icons-material/UploadFileRounded';
 import { NavLink, Outlet, useNavigate } from 'react-router';
 import { useLicense } from '../license/licenseModel';
 import { BypassBanner } from '../license/BypassBanner';
-import { SchemaTree } from '../schema/SchemaTree';
+import { useDisconnect } from '../connections/useConnections';
+import { capabilityState } from '../vector/vectorModel';
 import { statementForNode, qualifiedName, type SchemaNode } from '../schema/model';
+import type { CapabilityName } from '../schema/schemaTypes';
 import { layout } from '../theme/tokens';
 import { ConnectionBar } from './ConnectionBar';
 import { ResizableSidebar } from './ResizableSidebar';
+import { SchemaSidebar } from './SchemaSidebar';
 import { useTabs } from './tabsModel';
 import { useWorkspace } from './workspaceContext';
 
-const NAV_ITEMS = [
+interface NavItem {
+  to: string;
+  label: string;
+  icon: typeof AccountTreeRoundedIcon;
+  end: boolean;
+  /** Hidden behind an explanation when the connected cluster cannot do this (plan §7.1). */
+  capability?: CapabilityName;
+}
+
+const NAV_ITEMS: NavItem[] = [
   { to: '/', label: 'Workspace', icon: AccountTreeRoundedIcon, end: true },
-  { to: '/jobs', label: 'Jobs', icon: PlaylistPlayRoundedIcon, end: false },
-  { to: '/vector', label: 'Vector & ANN', icon: ScatterPlotRoundedIcon, end: false },
+  { to: '/jobs', label: 'Jobs', icon: PlaylistPlayRoundedIcon, end: true },
+  { to: '/jobs/load', label: 'Load data', icon: UploadFileRoundedIcon, end: false },
+  { to: '/statistics', label: 'Statistics', icon: QueryStatsRoundedIcon, end: false },
+  {
+    to: '/vector',
+    label: 'Vector & ANN',
+    icon: ScatterPlotRoundedIcon,
+    end: false,
+    capability: 'vector',
+  },
 ];
 
 /**
@@ -38,6 +60,7 @@ export function AppShell() {
   const workspace = useWorkspace();
   const { dispatch } = useTabs();
   const navigate = useNavigate();
+  const disconnect = useDisconnect();
 
   const openNode = (node: SchemaNode) => {
     if (node.kind !== 'TABLE' && node.kind !== 'VIEW') return;
@@ -56,10 +79,16 @@ export function AppShell() {
       {license.showBypassBanner && <BypassBanner />}
 
       <ConnectionBar
-        connections={workspace.connections}
         activeConnectionId={workspace.activeConnectionId}
+        connections={workspace.connections}
         status={workspace.status}
-        onSelect={workspace.setActiveConnectionId}
+        live={workspace.live}
+        clusterName={workspace.capabilities?.clusterName ?? null}
+        releaseVersion={workspace.capabilities?.releaseVersion ?? null}
+        onSelect={(id) => workspace.setActiveConnectionId(id || null)}
+        onDisconnect={() => {
+          if (workspace.activeConnectionId) disconnect.mutate(workspace.activeConnectionId);
+        }}
       />
 
       <Box sx={{ flex: 1, minHeight: 0, display: 'flex' }}>
@@ -77,45 +106,52 @@ export function AppShell() {
             borderColor: 'chrome.border',
           }}
         >
-          {NAV_ITEMS.map((item) => (
-            <NavLink key={item.to} to={item.to} end={item.end} style={{ textDecoration: 'none' }}>
-              {({ isActive }) => (
-                <Tooltip title={item.label} placement="right">
-                  <IconButton
-                    size="small"
-                    aria-label={item.label}
-                    color={isActive ? 'primary' : 'default'}
-                    sx={{ borderRadius: 1.5 }}
-                  >
-                    <item.icon fontSize="small" />
-                  </IconButton>
+          {NAV_ITEMS.map((item) => {
+            // "Unknown" is not "unsupported": before the probe has run, do not hide half the
+            // product. Once it has, an unsupported feature is disabled with the probe's own reason.
+            const gate =
+              item.capability && workspace.capabilities
+                ? capabilityState(workspace.capabilities, item.capability)
+                : null;
+
+            if (gate && !gate.supported) {
+              return (
+                <Tooltip key={item.to} title={gate.reason} placement="right">
+                  <span data-testid={`nav-disabled-${item.label}`}>
+                    <IconButton
+                      size="small"
+                      aria-label={item.label}
+                      disabled
+                      sx={{ borderRadius: 1.5 }}
+                    >
+                      <item.icon fontSize="small" />
+                    </IconButton>
+                  </span>
                 </Tooltip>
-              )}
-            </NavLink>
-          ))}
+              );
+            }
+
+            return (
+              <NavLink key={item.to} to={item.to} end={item.end} style={{ textDecoration: 'none' }}>
+                {({ isActive }) => (
+                  <Tooltip title={item.label} placement="right">
+                    <IconButton
+                      size="small"
+                      aria-label={item.label}
+                      color={isActive ? 'primary' : 'default'}
+                      sx={{ borderRadius: 1.5 }}
+                    >
+                      <item.icon fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
+                )}
+              </NavLink>
+            );
+          })}
         </Stack>
 
         <ResizableSidebar>
-          <Box
-            sx={{
-              px: 1.5,
-              py: 0.75,
-              borderBottom: 1,
-              borderColor: 'chrome.border',
-              display: 'flex',
-              alignItems: 'center',
-            }}
-          >
-            <Typography variant="caption" sx={{ fontWeight: 700, letterSpacing: '0.06em' }}>
-              SCHEMA
-            </Typography>
-          </Box>
-          <SchemaTree
-            nodes={workspace.schema}
-            selectedId={workspace.selectedNodeId}
-            onSelect={(node) => workspace.setSelectedNodeId(node.id)}
-            onOpenInEditor={openNode}
-          />
+          <SchemaSidebar onOpenInEditor={openNode} />
         </ResizableSidebar>
 
         <Box
@@ -143,6 +179,16 @@ export function AppShell() {
         <Typography variant="caption" color="text.secondary">
           {workspace.status === 'CONNECTED' ? 'Session active' : 'No session'}
         </Typography>
+        {workspace.selectedTable && (
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            sx={{ fontFamily: 'monospace' }}
+            data-testid="status-selection"
+          >
+            {workspace.selectedTable.keyspace}.{workspace.selectedTable.table}
+          </Typography>
+        )}
         <Box sx={{ flex: 1 }} />
         <Typography variant="caption" color="text.secondary" data-testid="status-edition">
           {license.bypass

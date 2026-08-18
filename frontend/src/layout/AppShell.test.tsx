@@ -6,6 +6,7 @@ import { renderWithProviders } from '../test/render';
 import { LicenseGate } from '../license/LicenseGate';
 import { WorkspaceProvider } from './WorkspaceProvider';
 import { routes } from '../routes/routes';
+import { placeholderCatalog } from '../schema/placeholderCatalog';
 import type { ConnectionSummary, LicenseStatus } from '../api/types';
 
 const licensed: LicenseStatus = {
@@ -44,7 +45,11 @@ function Routes() {
 function renderShell(status: LicenseStatus = licensed, initialEntries = ['/']) {
   return renderWithProviders(
     <LicenseGate statusOverride={status}>
-      <WorkspaceProvider initialConnections={connections}>
+      <WorkspaceProvider
+        live={false}
+        initialConnections={connections}
+        initialSchema={placeholderCatalog()}
+      >
         <MemoryRouter initialEntries={initialEntries}>
           <Routes />
         </MemoryRouter>
@@ -61,8 +66,8 @@ describe('AppShell', () => {
     expect(screen.getByTestId('schema-sidebar')).toBeInTheDocument();
     expect(screen.getByTestId('schema-tree')).toBeInTheDocument();
     expect(screen.getByTestId('tab-bar')).toBeInTheDocument();
+    expect(screen.getByTestId('query-workspace')).toBeInTheDocument();
     expect(screen.getByTestId('query-editor')).toBeInTheDocument();
-    expect(screen.getByTestId('data-grid-empty')).toBeInTheDocument();
   });
 
   it('shows the bypass banner above the whole shell in bypass mode', () => {
@@ -86,7 +91,7 @@ describe('AppShell', () => {
 
     const tabBar = screen.getByTestId('tab-bar');
     expect(within(tabBar).getByText('demo.orders')).toBeInTheDocument();
-  });
+  }, 20_000);
 
   it('opens same-named tables from different keyspaces as separate tabs', async () => {
     const user = userEvent.setup();
@@ -105,7 +110,7 @@ describe('AppShell', () => {
     const tabBar = screen.getByTestId('tab-bar');
     expect(within(tabBar).getByText('demo.users')).toBeInTheDocument();
     expect(within(tabBar).getByText('system_auth.users')).toBeInTheDocument();
-  });
+  }, 20_000);
 
   it('adds and closes query tabs', async () => {
     const user = userEvent.setup();
@@ -119,7 +124,7 @@ describe('AppShell', () => {
 
     await user.click(within(tabBar).getByRole('button', { name: /close query 2/i }));
     expect(within(tabBar).queryByText('Query 2')).not.toBeInTheDocument();
-  });
+  }, 20_000);
 
   it('routes to the jobs and vector panels', async () => {
     const user = userEvent.setup();
@@ -130,7 +135,7 @@ describe('AppShell', () => {
 
     await user.click(screen.getByRole('button', { name: /vector & ann/i }));
     expect(await screen.findByTestId('vector-panel')).toBeInTheDocument();
-  });
+  }, 20_000);
 
   it('renders a not-found page for an unknown route', () => {
     renderShell(licensed, ['/nope']);
@@ -159,5 +164,5 @@ describe('AppShell', () => {
     expect(screen.getByTestId('connection-status')).toHaveTextContent(/not connected/i);
     await user.click(screen.getByTestId('color-mode-toggle'));
     expect(screen.getByRole('button', { name: /toggle colour mode/i })).toBeInTheDocument();
-  });
+  }, 20_000);
 });

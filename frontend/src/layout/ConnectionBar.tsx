@@ -12,19 +12,27 @@ import Typography from '@mui/material/Typography';
 import AddRoundedIcon from '@mui/icons-material/AddRounded';
 import DarkModeRoundedIcon from '@mui/icons-material/DarkModeRounded';
 import LightModeRoundedIcon from '@mui/icons-material/LightModeRounded';
+import LinkRoundedIcon from '@mui/icons-material/LinkRounded';
 import LinkOffRoundedIcon from '@mui/icons-material/LinkOffRounded';
+import SettingsEthernetRoundedIcon from '@mui/icons-material/SettingsEthernetRounded';
 import CircleIcon from '@mui/icons-material/Circle';
 import type { ConnectionSummary, SessionStatus } from '../api/types';
 import { ConnectionDialog } from '../connections/ConnectionDialog';
 import type { ConnectionFormState } from '../connections/connectionModel';
+import { useConnect, useConnectionHealth, useConnections } from '../connections/useConnections';
 import { CassyxLogo } from '../theme/brand';
 import { useColorMode } from '../theme/colorMode';
 import { layout } from '../theme/tokens';
+import { ConnectionsDialog } from './ConnectionsDialog';
 
 export interface ConnectionBarProps {
-  connections: ConnectionSummary[];
   activeConnectionId: string | null;
-  status: SessionStatus;
+  /** Override for the live `useConnections()` list — direct unit tests and static renders. */
+  connections?: ConnectionSummary[];
+  /** Override for the live health-derived indicator. */
+  status?: SessionStatus;
+  /** `false` suspends the live queries. */
+  live?: boolean;
   onSelect?: (connectionId: string) => void;
   onDisconnect?: () => void;
   onCreate?: (form: ConnectionFormState, bundleFile: File | null) => void | Promise<void>;
@@ -50,13 +58,18 @@ const STATUS_LABEL: Record<SessionStatus, string> = {
 /**
  * Top connection bar (plan §2 shell / §3).
  *
- * Holds the multi-cluster switcher, the live connection indicator driven by the health-check
- * endpoint, the "new connection" entry point (all three modes), and the light/dark switch.
+ * Holds the multi-cluster switcher, the live connection indicator, the connections manager, the
+ * "new connection" entry point (all three modes), and the light/dark switch.
+ *
+ * The indicator is driven by `useConnectionHealth` — the health endpoint, polled — and the
+ * per-entry session badges by `useConnections`. Nothing here is static: a session that dies
+ * server-side goes grey here within one poll interval rather than lying until the next reload.
  */
 export function ConnectionBar({
-  connections,
   activeConnectionId,
-  status,
+  connections: connectionsOverride,
+  status: statusOverride,
+  live = true,
   onSelect,
   onDisconnect,
   onCreate,
@@ -64,7 +77,38 @@ export function ConnectionBar({
   releaseVersion,
 }: ConnectionBarProps) {
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [managerOpen, setManagerOpen] = useState(false);
   const { mode, toggle } = useColorMode();
+
+  const connectionsQuery = useConnections(live && connectionsOverride === undefined);
+  const connections = connectionsOverride ?? connectionsQuery.data ?? [];
+
+  const health = useConnectionHealth(
+    activeConnectionId ?? undefined,
+    live && statusOverride === undefined,
+  );
+  const connect = useConnect();
+
+  const status: SessionStatus =
+    statusOverride ??
+    (!activeConnectionId
+      ? 'DISCONNECTED'
+      : health.isError
+        ? 'ERROR'
+        : health.data
+          ? health.data.status === 'DISCONNECTED'
+            ? 'DISCONNECTED'
+            : 'CONNECTED'
+          : health.isPending
+            ? 'CONNECTING'
+            : 'DISCONNECTED');
+
+  const indicatorDetail =
+    health.data && health.data.status !== 'DISCONNECTED'
+      ? `${health.data.status} · ${health.data.openConnections ?? 0} open, ${
+          health.data.inFlightRequests ?? 0
+        } in flight`
+      : STATUS_LABEL[status];
 
   return (
     <Box
@@ -89,7 +133,11 @@ export function ConnectionBar({
       <Select
         size="small"
         displayEmpty
-        value={activeConnectionId ?? ''}
+        value={
+          connections.some((candidate) => candidate.id === activeConnectionId)
+            ? (activeConnectionId ?? '')
+            : ''
+        }
         onChange={(event) => onSelect?.(event.target.value)}
         sx={{ minWidth: 220 }}
         inputProps={{ 'aria-label': 'Active connection', 'data-testid': 'connection-select' }}
@@ -102,10 +150,22 @@ export function ConnectionBar({
             <Stack direction="row" spacing={1} alignItems="center">
               <Typography variant="body2">{connection.name}</Typography>
               <Chip size="small" variant="outlined" label={connection.mode} />
+              {connection.connected && <Chip size="small" color="success" label="session" />}
             </Stack>
           </MenuItem>
         ))}
       </Select>
+
+      <Tooltip title="Manage connections — connect, disconnect, delete">
+        <IconButton
+          size="small"
+          aria-label="Manage connections"
+          onClick={() => setManagerOpen(true)}
+          data-testid="manage-connections"
+        >
+          <SettingsEthernetRoundedIcon fontSize="small" />
+        </IconButton>
+      </Tooltip>
 
       <Tooltip title="New connection — Cassandra/DSE, Astra DB or advanced HOCON">
         <IconButton
@@ -118,22 +178,24 @@ export function ConnectionBar({
         </IconButton>
       </Tooltip>
 
-      <Stack direction="row" spacing={0.75} alignItems="center" data-testid="connection-status">
-        <CircleIcon sx={{ fontSize: 10 }} color={STATUS_COLOR[status]} />
-        <Typography variant="caption" color="text.secondary">
-          {STATUS_LABEL[status]}
-        </Typography>
-        {status === 'CONNECTED' && clusterName && (
-          <Typography variant="caption" color="text.secondary" sx={{ fontFamily: 'monospace' }}>
-            · {clusterName}
-            {releaseVersion ? ` ${releaseVersion}` : ''}
+      <Tooltip title={indicatorDetail}>
+        <Stack direction="row" spacing={0.75} alignItems="center" data-testid="connection-status">
+          <CircleIcon sx={{ fontSize: 10 }} color={STATUS_COLOR[status]} />
+          <Typography variant="caption" color="text.secondary">
+            {STATUS_LABEL[status]}
           </Typography>
-        )}
-      </Stack>
+          {status === 'CONNECTED' && clusterName && (
+            <Typography variant="caption" color="text.secondary" sx={{ fontFamily: 'monospace' }}>
+              · {clusterName}
+              {releaseVersion ? ` ${releaseVersion}` : ''}
+            </Typography>
+          )}
+        </Stack>
+      </Tooltip>
 
       <Box sx={{ flex: 1 }} />
 
-      {status === 'CONNECTED' && (
+      {status === 'CONNECTED' ? (
         <Button
           size="small"
           startIcon={<LinkOffRoundedIcon />}
@@ -142,6 +204,18 @@ export function ConnectionBar({
         >
           Disconnect
         </Button>
+      ) : (
+        activeConnectionId && (
+          <Button
+            size="small"
+            startIcon={<LinkRoundedIcon />}
+            disabled={connect.isPending}
+            onClick={() => connect.mutate(activeConnectionId)}
+            data-testid="connect"
+          >
+            Connect
+          </Button>
+        )
       )}
 
       <Tooltip title={mode === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}>
@@ -158,6 +232,18 @@ export function ConnectionBar({
           )}
         </IconButton>
       </Tooltip>
+
+      <ConnectionsDialog
+        open={managerOpen}
+        onClose={() => setManagerOpen(false)}
+        activeConnectionId={activeConnectionId}
+        live={live}
+        onSelect={(id) => onSelect?.(id)}
+        onNewConnection={() => {
+          setManagerOpen(false);
+          setDialogOpen(true);
+        }}
+      />
 
       <ConnectionDialog
         open={dialogOpen}
