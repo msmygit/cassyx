@@ -1949,7 +1949,7 @@ paths:
       operationId: previewDdl
       summary: Preview DDL for an existing object (`describe`)
       description: |
-        Uses `TableMetadata#describe(true)` and its siblings. Requires driver 4.19.0 for correct
+        Uses `TableMetadata#describe(true)` and its siblings. Requires driver 4.19.3 for correct
         `vector<float, N>` rendering (CASSJAVA-2) — earlier 4.x patches emit invalid CQL.
       requestBody:
         required: true
@@ -3146,7 +3146,7 @@ paths:
       operationId: addVectorColumn
       summary: Add a `vector<float, N>` column
       description: |
-        Requires `java-driver-core` 4.19.0 for correct vector DDL (CASSJAVA-2) and the `vector`
+        Requires `java-driver-core` 4.19.3 for correct vector DDL (CASSJAVA-2) and the `vector`
         capability (C* 5.x or Astra).
       requestBody:
         required: true
@@ -4105,10 +4105,10 @@ components:
           example: "2026-08-17T09:14:02Z"
         driverVersion:
           type: string
-          example: 4.19.0
+          example: 4.19.3
         dsbulkVersion:
           type: string
-          example: 1.11.1
+          example: 1.11.2
         liveSessions:
           type: integer
           example: 2
@@ -6392,7 +6392,7 @@ components:
         definition:
           type: string
           description: |
-            The DEFINITION tab — `TableMetadata#describe(true)`. Requires driver 4.19.0 for
+            The DEFINITION tab — `TableMetadata#describe(true)`. Requires driver 4.19.3 for
             correct `vector<float, N>` rendering (CASSJAVA-2).
           example: |
             CREATE TABLE demo.users (

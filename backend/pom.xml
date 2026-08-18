@@ -26,21 +26,27 @@
 
     <!-- ===== version pins: docs/plan.md section 2 "Version pins" table ===== -->
     <spring-boot.version>3.5.4</spring-boot.version>
-    <java-driver.version>4.19.0</java-driver.version>
-    <stripe.version>33.2.0</stripe.version>
-    <dsbulk.version>1.11.1</dsbulk.version>
+    <java-driver.version>4.19.3</java-driver.version>
+    <stripe.version>33.3.0</stripe.version>
+    <dsbulk.version>1.11.2</dsbulk.version>
 
     <!-- ===== security pins: docs/plan.md section 2 "Security pin required" =====
          CVE-2026-24400 - org.assertj:assertj-core XXE in XmlStringPrettyFormatter
                           (vulnerable 1.4.0 .. 3.27.6, fixed in 3.27.7). Reachable through the
                           DSBulk 1.x dependency tree, which ships assertj on non-test scopes.
          CVE-2023-6378  - ch.qos.logback:logback-classic / logback-core deserialisation DoS in the
-                          receiver component (vulnerable < 1.3.12 / < 1.4.12). DSBulk 1.11.1 pulls
+                          receiver component (vulnerable < 1.3.12 / < 1.4.12). DSBulk 1.11.x pulls
                           logback 1.2.x transitively.
          Both are pinned in <dependencyManagement> below so ANY module that later adds DSBulk
          inherits the safe versions. Do not lower these. OWASP Dependency-Check runs in CI. -->
     <assertj.version>3.27.7</assertj.version>
     <logback.version>1.5.18</logback.version>
+    <!-- Flagged by the weekly cve-scan against the versions Spring Boot 3.5.4 and the Cassandra
+         driver pull in (jackson-databind 2.19.2, netty 4.1.123.Final). Both stay on their current
+         major/minor line - these are maintenance releases, not upgrades - so the blast radius is
+         small while still clearing the findings. -->
+    <jackson-bom.version>2.19.4</jackson-bom.version>
+    <netty.version>4.1.137.Final</netty.version>
 
     <!-- tooling -->
     <junit.version>5.11.4</junit.version>
@@ -120,17 +126,41 @@
         <version>${dsbulk.version}</version>
       </dependency>
 
-      <dependency>
-        <groupId>org.springframework.boot</groupId>
-        <artifactId>spring-boot-dependencies</artifactId>
-        <version>${spring-boot.version}</version>
-        <type>pom</type>
-        <scope>import</scope>
-      </dependency>
+      <!-- MUST be imported BEFORE spring-boot-dependencies. Spring Boot 3.5.4's BOM manages
+           org.apache.cassandra:java-driver-core itself via <cassandra-driver.version>4.19.0</...>,
+           and for IMPORTED boms it is first-declaration-wins - overriding the property in this POM
+           does nothing, because the property is resolved inside the imported BOM, not here.
+           Declared after Spring Boot, this BOM was silently ignored: the property said 4.19.3 while
+           `dependency:tree` still resolved 4.19.0. Verified with dependency:tree, not by reading. -->
       <dependency>
         <groupId>org.apache.cassandra</groupId>
         <artifactId>java-driver-bom</artifactId>
         <version>${java-driver.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+      <!-- Security BOMs, imported BEFORE Spring Boot's for the first-declaration-wins reason
+           documented on java-driver-bom below. Spring Boot 3.5.4 manages jackson-bom 2.19.2 and
+           netty 4.1.123.Final; declared after it, these would be silently ignored. -->
+      <dependency>
+        <groupId>com.fasterxml.jackson</groupId>
+        <artifactId>jackson-bom</artifactId>
+        <version>${jackson-bom.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+      <dependency>
+        <groupId>io.netty</groupId>
+        <artifactId>netty-bom</artifactId>
+        <version>${netty.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+
+      <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-dependencies</artifactId>
+        <version>${spring-boot.version}</version>
         <type>pom</type>
         <scope>import</scope>
       </dependency>
