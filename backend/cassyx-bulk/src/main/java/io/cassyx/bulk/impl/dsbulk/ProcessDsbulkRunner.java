@@ -35,8 +35,10 @@ import org.slf4j.LoggerFactory;
  *
  * <ul>
  *   <li><b>Isolation.</b> A job that exhausts its heap takes down its own JVM, not the API.
- *   <li><b>Real cancellation.</b> {@link #cancel(Path)} sends a signal. There is no cooperative
- *       interrupt to hope DSBulk honours.
+ *   <li><b>Real cancellation.</b> {@link #cancel(Path)} sends a signal to the child's whole PROCESS
+ *       GROUP. There is no cooperative interrupt to hope DSBulk honours, and no descendant left
+ *       behind - see {@link #inOwnProcessGroup} for why signalling only the direct child is not
+ *       enough.
  *   <li><b>Memory capping.</b> {@code -Xmx} per job, set independently of the server's heap.
  *   <li><b>Immunity to {@code System.exit()}.</b> DSBulk exits with a meaningful status; in-process
  *       that call would end the application. Here it is just an integer we read.
@@ -62,7 +64,18 @@ public final class ProcessDsbulkRunner implements DsbulkRunner {
   private final String maxHeap;
   private final Duration killGrace;
   private final ProcessStarter starter;
-  private final Map<Path, Process> running = new ConcurrentHashMap<>();
+  private final Map<Path, Child> running = new ConcurrentHashMap<>();
+
+  /**
+   * A started child plus the process group it was placed in, or {@link #NO_GROUP}.
+   *
+   * <p>The group is captured at start time, not at cancel time, and that is the whole point. A
+   * {@code descendants()} snapshot taken just before signalling is a TOCTOU race - the child may not
+   * have forked its JVM yet, and anything it forks afterwards is missed. A process group id is fixed
+   * by {@code setsid(2)} at exec time and every later {@code fork()} inherits it, so signalling the
+   * group reaches descendants that did not exist when cancellation was requested.
+   */
+  private record Child(Process process, long processGroup) {}
 
   public ProcessDsbulkRunner(DsbulkDistribution distribution, String maxHeap) {
     this(distribution, maxHeap, DEFAULT_KILL_GRACE, ProcessBuilder::start);
@@ -100,7 +113,7 @@ public final class ProcessDsbulkRunner implements DsbulkRunner {
 
     Path stdoutFile = workDir.resolve(STDOUT_FILE_NAME);
     List<String> command = command(plan, confFile);
-    ProcessBuilder builder = new ProcessBuilder(command);
+    ProcessBuilder builder = new ProcessBuilder(inOwnProcessGroup(command));
     builder.directory(workDir.toFile());
     // STDOUT goes to a FILE, STDERR to the pipe we read. This is not arbitrary: DSBulk writes the
     // `count` workflow's report to stdout and everything else - logging AND the console progress
@@ -121,7 +134,8 @@ public final class ProcessDsbulkRunner implements DsbulkRunner {
     } catch (IOException e) {
       throw new DsbulkException("Cannot start the DSBulk process: " + String.join(" ", command), e);
     }
-    running.put(workDir, process);
+    Child child = new Child(process, processGroupOf(process));
+    running.put(workDir, child);
 
     DsbulkProgressTracker tracker = new DsbulkProgressTracker();
     long rows = 0;
@@ -146,7 +160,7 @@ public final class ProcessDsbulkRunner implements DsbulkRunner {
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
       interrupted = true;
-      terminate(process);
+      terminate(child);
     } finally {
       running.remove(workDir);
     }
@@ -192,24 +206,178 @@ public final class ProcessDsbulkRunner implements DsbulkRunner {
 
   @Override
   public boolean cancel(Path jobDirectory) {
-    Process process = running.get(jobDirectory.toAbsolutePath().normalize());
-    if (process == null || !process.isAlive()) {
+    Child child = running.get(jobDirectory.toAbsolutePath().normalize());
+    if (child == null || !child.process().isAlive()) {
       return false;
     }
-    terminate(process);
+    terminate(child);
     return true;
   }
 
-  /** SIGTERM, then SIGKILL after the grace period: DSBulk flushes its error reports on SIGTERM. */
-  private void terminate(Process process) {
+  /**
+   * SIGTERM to the whole process group, then SIGKILL after the grace period.
+   *
+   * <p>SIGTERM first because DSBulk flushes its error reports and checkpoint on it. The group rather
+   * than the process because {@code bin/dsbulk} is a shell wrapper around a JVM and killing the
+   * wrapper alone leaves the JVM running against the user's cluster while the UI says CANCELLED.
+   *
+   * <p>The escalation to SIGKILL is driven by the GROUP, not by the direct child: an orphan that
+   * outlives its parent still holds the inherited stderr pipe, and {@link #run} sits in
+   * {@code readLine()} until that pipe closes. Waiting only on the direct child would return here
+   * promptly and hang the worker thread forever.
+   */
+  private void terminate(Child child) {
+    Process process = child.process();
+    long group = child.processGroup();
+    signalGroup(group, "TERM");
     process.destroy();
     try {
-      if (!process.waitFor(killGrace.toMillis(), TimeUnit.MILLISECONDS)) {
+      boolean exited = process.waitFor(killGrace.toMillis(), TimeUnit.MILLISECONDS);
+      if (!exited || groupIsAlive(group)) {
+        signalGroup(group, "KILL");
         process.destroyForcibly();
       }
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
+      signalGroup(group, "KILL");
       process.destroyForcibly();
+    }
+  }
+
+  /* ------------------------------------------------------------------------- process groups */
+
+  /** Sentinel for "this child is not in a process group of its own, so only it may be signalled". */
+  static final long NO_GROUP = -1;
+
+  /**
+   * {@code setsid(1)}, or {@code null} where the platform does not ship it (notably macOS).
+   *
+   * <p>Probed once. Without it the child stays in the server's own process group and there is
+   * nothing safe to signal but the child itself - see {@link #processGroupOf}.
+   */
+  static final String SETSID = findSetsid();
+
+  /** The server's own process group. Signalling it would kill the API along with the job. */
+  private static final long OWN_GROUP = readProcessGroup(ProcessHandle.current().pid());
+
+  private static String findSetsid() {
+    for (String candidate : List.of("/usr/bin/setsid", "/bin/setsid")) {
+      if (Files.isExecutable(Path.of(candidate))) {
+        return candidate;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Prefixes {@code command} with {@code setsid} so the child leads its own session and group.
+   *
+   * <p>This is the fix for process-tree cancellation, and it has to happen at START time. The
+   * alternative - snapshotting {@code Process.descendants()} at cancel time and destroying each -
+   * does not work: it is a time-of-check/time-of-use race against a child that has not forked its
+   * JVM yet, and any process forked after the snapshot survives, keeps the inherited stderr pipe
+   * open and leaves {@link #run} blocked in {@code readLine()} forever.
+   *
+   * <p>{@code setsid} only forks when the caller is already a process group leader. A child of this
+   * JVM never is, so it {@code exec}s in place: the pid Java holds stays the pid of the real
+   * command, and {@code waitFor()}/{@code exitValue()} keep reporting DSBulk's own exit status.
+   */
+  static List<String> inOwnProcessGroup(List<String> command) {
+    if (SETSID == null || command.isEmpty()) {
+      return command;
+    }
+    List<String> wrapped = new ArrayList<>(command.size() + 1);
+    wrapped.add(SETSID);
+    wrapped.addAll(command);
+    return List.copyOf(wrapped);
+  }
+
+  /**
+   * The child's process group, or {@link #NO_GROUP} when signalling it would be unsafe.
+   *
+   * <p>Read from the OS rather than assumed to equal the pid: if {@code setsid} was unavailable, did
+   * fork, or the platform behaves differently, the child sits in the SERVER's group and a group
+   * signal would take down the API. Refusing in that case degrades to today's behaviour - the direct
+   * child is still killed - instead of turning a cancel into an outage.
+   */
+  static long processGroupOf(Process process) {
+    if (SETSID == null || !process.isAlive()) {
+      return NO_GROUP;
+    }
+    long group = readProcessGroup(process.pid());
+    if (group <= 0 || group == OWN_GROUP) {
+      LOG.debug("Child {} is not in a process group of its own; cancelling it alone", process.pid());
+      return NO_GROUP;
+    }
+    return group;
+  }
+
+  /** {@code ps -o pgid= -p <pid>}; {@link #NO_GROUP} when {@code ps} is absent or says nothing. */
+  private static long readProcessGroup(long pid) {
+    String out = exec(List.of("ps", "-o", "pgid=", "-p", Long.toString(pid)));
+    if (out == null || out.isBlank()) {
+      return NO_GROUP;
+    }
+    try {
+      return Long.parseLong(out.trim());
+    } catch (NumberFormatException e) {
+      return NO_GROUP;
+    }
+  }
+
+  /**
+   * {@code true} when any member of {@code group} is still running.
+   *
+   * <p>A zombie does not count: it holds no file descriptor, so it cannot be what is keeping
+   * {@link #run} blocked, and it disappears as soon as its reaper gets to it.
+   *
+   * <p>The whole table is listed and filtered here rather than asking {@code ps} to select the
+   * group: {@code ps -g} means "session" on procps and "process group" on BSD, and a selector that
+   * means two things on two platforms is a silent no-op on one of them.
+   */
+  static boolean groupIsAlive(long group) {
+    if (group == NO_GROUP) {
+      return false;
+    }
+    String out = exec(List.of("ps", "-eo", "pgid=,stat="));
+    if (out == null) {
+      return false;
+    }
+    String prefix = Long.toString(group);
+    return out.lines()
+        .map(String::trim)
+        .map(line -> line.split("\\s+"))
+        .filter(columns -> columns.length >= 2 && prefix.equals(columns[0]))
+        .anyMatch(columns -> !columns[1].isEmpty() && columns[1].charAt(0) != 'Z');
+  }
+
+  /** Signals a whole process group. A negative pid means "the group" to {@code kill(2)}. */
+  private static void signalGroup(long group, String signal) {
+    if (group == NO_GROUP) {
+      return;
+    }
+    exec(List.of("kill", "-" + signal, "--", "-" + group));
+  }
+
+  /** Runs a short command and returns its stdout, or {@code null} if it could not be run. */
+  private static String exec(List<String> command) {
+    try {
+      Process process = new ProcessBuilder(command)
+          .redirectErrorStream(false)
+          .redirectError(ProcessBuilder.Redirect.DISCARD)
+          .start();
+      process.getOutputStream().close();
+      String out = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+      if (!process.waitFor(5, TimeUnit.SECONDS)) {
+        process.destroyForcibly();
+      }
+      return out;
+    } catch (IOException e) {
+      LOG.debug("Cannot run {}: {}", command, e.toString());
+      return null;
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      return null;
     }
   }
 

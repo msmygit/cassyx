@@ -34,8 +34,16 @@ import {
   type SaveConnectionResult,
 } from './saveConnection';
 
-export function useConnections(): UseQueryResult<ConnectionResponse[]> {
-  return useQuery({ queryKey: queryKeys.connections, queryFn: () => listConnections() });
+/**
+ * @param enabled `false` suspends the fetch — used by the shell's non-live test/offline mode so
+ *   mounting the connection bar never issues a request it cannot satisfy.
+ */
+export function useConnections(enabled = true): UseQueryResult<ConnectionResponse[]> {
+  return useQuery({
+    queryKey: queryKeys.connections,
+    queryFn: () => listConnections(),
+    enabled,
+  });
 }
 
 export function useConnectionHealth(

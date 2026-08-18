@@ -12,6 +12,12 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 import com.datastax.oss.driver.api.core.CqlSession;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.cassyx.bulk.api.dsbulk.DsbulkJobSpec;
+import io.cassyx.bulk.api.dsbulk.DsbulkListener;
+import io.cassyx.bulk.api.dsbulk.DsbulkOperation;
+import io.cassyx.bulk.api.dsbulk.DsbulkPlan;
+import io.cassyx.bulk.api.dsbulk.DsbulkResult;
+import io.cassyx.bulk.api.dsbulk.DsbulkRunner;
 import io.cassyx.core.api.ClusterCapabilities;
 import io.cassyx.core.api.ConnectionNotOpenException;
 import io.cassyx.core.api.SessionRegistry;
@@ -23,7 +29,9 @@ import java.time.Clock;
 import java.time.Instant;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -70,6 +78,8 @@ class JobEndpointsTest {
   private MockMvc mvc;
   private JobRepository repository;
   private JobService jobs;
+  private DsbulkJobService dsbulkJobs;
+  private SleepingRunner runner;
   private DsbulkJobEventStream events;
 
   @BeforeAll
@@ -114,18 +124,29 @@ class JobEndpointsTest {
     ObjectMapper mapper = new ObjectMapper();
     repository = new JobRepository(jdbc, mapper);
     events = new DsbulkJobEventStream();
+    runner = new SleepingRunner();
+    dsbulkJobs =
+        new DsbulkJobService(
+            new DsbulkJobRepository(jdbc),
+            events,
+            runner,
+            Executors.newSingleThreadExecutor(),
+            new DisconnectedSessions(),
+            mapper,
+            artifactRoot,
+            Clock.systemUTC());
     jobs =
         new JobService(
             repository,
             events,
+            dsbulkJobs,
             new DisconnectedSessions(),
             Executors.newSingleThreadExecutor(),
             mapper,
             artifactRoot,
             Clock.systemUTC(),
             4);
-    JobController controller =
-        new JobController(repository, jobs, events, new NoDsbulkService());
+    JobController controller = new JobController(repository, jobs, events);
     mvc =
         MockMvcBuilders.standaloneSetup(controller, new UnloadJobController(jobs))
             .setControllerAdvice(new JobProblemAdvice())
@@ -153,27 +174,54 @@ class JobEndpointsTest {
     }
   }
 
-  /** No DSBulk service in this slice; cancellation of a DSBulk job is that workstream's test. */
-  private static final class NoDsbulkService
-      implements org.springframework.beans.factory.ObjectProvider<DsbulkJobService> {
+  /**
+   * A DSBulk runner that starts a REAL long-running child process and blocks until it dies.
+   *
+   * <p>Not a mock, and that is the point of the test it serves. The bug being guarded against is a
+   * cancel that returns success while a process keeps running; a mocked runner whose {@code cancel}
+   * returns {@code true} would report exactly the same success and prove nothing. This one exposes
+   * the actual {@link Process}, so the test can ask the operating system whether it is still there.
+   */
+  private static final class SleepingRunner implements DsbulkRunner {
+
+    private final java.util.concurrent.atomic.AtomicReference<Process> process =
+        new java.util.concurrent.atomic.AtomicReference<>();
+    private final CountDownLatch started = new CountDownLatch(1);
+    private volatile Path directory;
+
     @Override
-    public DsbulkJobService getObject(Object... args) {
-      throw new UnsupportedOperationException();
+    public DsbulkResult run(
+        DsbulkPlan plan, Path jobDirectory, Map<String, String> secrets, DsbulkListener listener) {
+      this.directory = jobDirectory.toAbsolutePath().normalize();
+      try {
+        Process child =
+            new ProcessBuilder("sh", "-c", "exec sleep 120")
+                .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                .redirectError(ProcessBuilder.Redirect.DISCARD)
+                .start();
+        process.set(child);
+        started.countDown();
+        int exit = child.waitFor();
+        return new DsbulkResult(exit, 0, 0, java.time.Duration.ofMillis(1), jobDirectory,
+            java.util.List.of(), io.cassyx.bulk.api.dsbulk.DsbulkCountReport.EMPTY, "killed");
+      } catch (java.io.IOException e) {
+        throw new IllegalStateException(e);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        throw new IllegalStateException(e);
+      }
     }
 
     @Override
-    public DsbulkJobService getObject() {
-      throw new UnsupportedOperationException();
-    }
-
-    @Override
-    public DsbulkJobService getIfAvailable() {
-      return null;
-    }
-
-    @Override
-    public DsbulkJobService getIfUnique() {
-      return null;
+    public boolean cancel(Path jobDirectory) {
+      Process child = process.get();
+      if (child == null
+          || !child.isAlive()
+          || !jobDirectory.toAbsolutePath().normalize().equals(directory)) {
+        return false;
+      }
+      child.destroy();
+      return true;
     }
   }
 
@@ -294,6 +342,46 @@ class JobEndpointsTest {
     mvc.perform(post("/api/jobs/{id}/cancel", running))
         .andExpect(status().isAccepted())
         .andExpect(jsonPath("$.id").value(running));
+  }
+
+  @Test
+  @DisplayName("cancelling a DSBULK job kills the process and lands the row in CANCELLED")
+  void cancelReachesTheDsbulkEngine() throws Exception {
+    DsbulkJobSpec spec = DsbulkJobSpec.table(
+        DsbulkOperation.LOAD, "demo", "users", "csv", artifactRoot.resolve("in.csv").toString());
+    String id = dsbulkJobs.submit(CONNECTION, "Load demo.users", spec).id();
+
+    assertThat(runner.started.await(20, TimeUnit.SECONDS)).as("the child process started").isTrue();
+    Process child = runner.process.get();
+    assertThat(child.isAlive()).isTrue();
+
+    // THE regression. Before JobService routed on the row's engine, this returned 202 with the job
+    // still RUNNING and `sleep` still on the process table - the UI said stopped, the cluster did
+    // not. The engine column is what makes the routing correct, so assert it is really DSBULK.
+    assertThat(repository.find(id)).get().extracting(io.cassyx.api.bulk.JobDtos.Job::engine)
+        .isEqualTo("DSBULK");
+
+    mvc.perform(post("/api/jobs/{id}/cancel", id)).andExpect(status().isAccepted());
+
+    assertThat(child.waitFor(20, TimeUnit.SECONDS)).as("the child process is gone").isTrue();
+    assertThat(child.isAlive()).isFalse();
+    assertThat(awaitTerminal(id)).isEqualTo("CANCELLED");
+
+    // The worker thread wakes up afterwards holding exit 143 and must not relabel this a failure.
+    Thread.sleep(300);
+    assertThat(repository.find(id)).get()
+        .extracting(io.cassyx.api.bulk.JobDtos.Job::status).isEqualTo("CANCELLED");
+    assertThat(events.snapshot(id)).extracting(DsbulkJobEventStream.Event::name)
+        .contains("status", "completed");
+  }
+
+  @Test
+  @DisplayName("a RUNNING row no engine owns is cancelled outright, not answered 202 and left running")
+  void cancelOfAnOrphanedRowIsHonest() throws Exception {
+    String orphan = seed("UNLOAD", "RUNNING", "demo", "users", null);
+    mvc.perform(post("/api/jobs/{id}/cancel", orphan)).andExpect(status().isAccepted());
+    assertThat(repository.find(orphan)).get()
+        .extracting(io.cassyx.api.bulk.JobDtos.Job::status).isEqualTo("CANCELLED");
   }
 
   /* ---------------------------------------------------------------------------------- SSE */

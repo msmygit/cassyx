@@ -1,4 +1,4 @@
-import { useMemo, useState, type DragEvent, type MouseEvent } from 'react';
+import { useMemo, useState, type DragEvent, type MouseEvent, type ReactNode } from 'react';
 import Box from '@mui/material/Box';
 import Checkbox from '@mui/material/Checkbox';
 import Chip from '@mui/material/Chip';
@@ -31,6 +31,9 @@ import {
   type SchemaNode,
 } from './model';
 
+/** Context-menu DDL entries, dispatched with the node's OWN identity (plan §4). */
+export type SchemaTreeDdlAction = 'ALTER' | 'DROP' | 'TRUNCATE';
+
 export interface SchemaTreeProps {
   nodes: SchemaNode[];
   /** Fired with the node's OWN identity — callers must not infer it from anywhere else. */
@@ -39,6 +42,19 @@ export interface SchemaTreeProps {
   /** Default preview page size used when building drag statements. */
   previewLimit?: number | null;
   selectedId?: string | null;
+  /**
+   * Controlled "show system keyspaces" state. Left unset the tree owns it locally; the app shell
+   * lifts it so the value can reach `GET …/schema?includeSystem=`.
+   */
+  showSystem?: boolean;
+  onShowSystemChange?: (showSystem: boolean) => void;
+  /**
+   * Adds Alter / Drop / Truncate to the context menu. Omitted, the menu keeps its read-only
+   * entries — a tree with no DDL host must not offer actions it cannot perform.
+   */
+  onDdlAction?: (action: SchemaTreeDdlAction, node: SchemaNode) => void;
+  /** Extra context-menu entries contributed by the shell (e.g. "Load data into…"). */
+  extraMenuItems?: (node: SchemaNode, close: () => void) => ReactNode;
 }
 
 const KIND_ICON: Record<SchemaNodeKind, typeof StorageRoundedIcon> = {
@@ -59,6 +75,35 @@ interface ContextMenuState {
   node: SchemaNode;
 }
 
+const ACTION_LABEL: Record<SchemaTreeDdlAction, string> = {
+  ALTER: 'Alter…',
+  DROP: 'Drop…',
+  TRUNCATE: 'Truncate…',
+};
+
+/**
+ * Which DDL actions make sense for a node kind. `TRUNCATE` is table-only — offering it on a
+ * keyspace or a column would be a statement the server has to reject.
+ */
+function ddlActionsFor(node: SchemaNode): SchemaTreeDdlAction[] {
+  switch (node.kind) {
+    case 'TABLE':
+      return ['ALTER', 'TRUNCATE', 'DROP'];
+    case 'KEYSPACE':
+    case 'VIEW':
+    case 'TYPE':
+    case 'COLUMN':
+      return ['ALTER', 'DROP'];
+    case 'INDEX':
+    case 'FUNCTION':
+    case 'AGGREGATE':
+    case 'ROLE':
+      return ['DROP'];
+    default:
+      return [];
+  }
+}
+
 /**
  * Schema browser (plan §4).
  *
@@ -73,9 +118,18 @@ export function SchemaTree({
   onOpenInEditor,
   previewLimit = 500,
   selectedId = null,
+  showSystem: showSystemProp,
+  onShowSystemChange,
+  onDdlAction,
+  extraMenuItems,
 }: SchemaTreeProps) {
   const [search, setSearch] = useState('');
-  const [showSystem, setShowSystem] = useState(false);
+  const [localShowSystem, setLocalShowSystem] = useState(false);
+  const showSystem = showSystemProp ?? localShowSystem;
+  const setShowSystem = (next: boolean) => {
+    setLocalShowSystem(next);
+    onShowSystemChange?.(next);
+  };
   const [manuallyExpanded, setManuallyExpanded] = useState<Set<string>>(new Set());
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
 
@@ -232,6 +286,24 @@ export function SchemaTree({
         >
           Copy qualified name
         </MenuItem>
+
+        {onDdlAction &&
+          contextMenu &&
+          ddlActionsFor(contextMenu.node).map((action) => (
+            <MenuItem
+              key={action}
+              data-testid={`context-menu-${action.toLowerCase()}`}
+              onClick={() => {
+                // The node is passed by value — the DDL host receives THIS node's identity.
+                onDdlAction(action, contextMenu.node);
+                closeMenu();
+              }}
+            >
+              {ACTION_LABEL[action]}
+            </MenuItem>
+          ))}
+
+        {contextMenu && extraMenuItems?.(contextMenu.node, closeMenu)}
       </Menu>
     </Stack>
   );

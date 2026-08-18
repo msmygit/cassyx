@@ -111,7 +111,7 @@ class DsbulkPlanAndCommandTest {
   @Test
   @DisplayName("secrets are masked in the plan, and restored only in the file on disk")
   void secretsAreMaskedInThePlanAndRestoredOnDisk() {
-    DsbulkPlan plan = unloadPlan(Map.of("s3.secretAccessKey", "REAL-SECRET", "s3.region", "eu-west-1"));
+    DsbulkPlan plan = s3Plan(Map.of("s3.secretAccessKey", "REAL-SECRET", "s3.region", "eu-west-1"));
 
     assertThat(plan.maskedFields()).contains("s3.secretAccessKey").doesNotContain("s3.region");
     assertThat(plan.value("s3.secretAccessKey")).isEqualTo("***");
@@ -123,6 +123,99 @@ class DsbulkPlanAndCommandTest {
     // The prefixed spelling must resolve to the same setting.
     assertThat(DsbulkPlanner.realHocon(plan, Map.of("dsbulk.s3.secretAccessKey", "REAL-SECRET")))
         .contains("REAL-SECRET");
+  }
+
+  /* ------------------------------------------------------------------------------------ s3 */
+
+  private static DsbulkPlan s3Plan(Map<String, String> overrides) {
+    DsbulkJobSpec spec = new DsbulkJobSpec(DsbulkOperation.UNLOAD, "demo", "users", null, "csv",
+        "s3://exports/users", null, false, null, 10, overrides);
+    return DsbulkPlanner.plan(spec, DsbulkProbe.UNKNOWN, JOB_DIR, "UNLOAD_6c8f2a10");
+  }
+
+  @Test
+  @DisplayName("s3 region/profile/credentials become s3:// URL query parameters, not settings")
+  void s3SettingsBecomeUrlParameters() {
+    DsbulkPlan plan = s3Plan(Map.of(
+        "s3.region", "eu-west-1",
+        "s3.profile", "exports",
+        "s3.accessKeyId", "AKIAEXAMPLE",
+        "s3.clientCacheSize", "40"));
+
+    // Only clientCacheSize is a real DSBulk 1.11 setting; the rest would be silently accepted and
+    // ignored by Typesafe Config, which is exactly what makes writing them out dangerous.
+    assertThat(plan.hocon()).contains("dsbulk.s3.clientCacheSize = 40");
+    assertThat(plan.hocon()).doesNotContain("dsbulk.s3.region").doesNotContain("dsbulk.s3.profile");
+    assertThat(plan.hocon()).doesNotContain("dsbulk.s3.accessKeyId");
+
+    // The preview carries the masked key - the URL is now a secret carrier, so it must be masked
+    // like one; the real credential only ever reaches the file the runner writes.
+    assertThat(plan.hocon())
+        .contains("s3://exports/users?region=eu-west-1&profile=exports&accessKeyId=***");
+    assertThat(DsbulkPlanner.realHocon(plan, Map.of("s3.accessKeyId", "AKIAEXAMPLE")))
+        .contains("s3://exports/users?region=eu-west-1&profile=exports&accessKeyId=AKIAEXAMPLE");
+
+    // The fields survive in the settings list so the UI can still render and edit them.
+    assertThat(plan.value("s3.region")).isEqualTo("eu-west-1");
+  }
+
+  @Test
+  @DisplayName("a URL carrying credentials stays OFF the command line, where `ps` would expose it")
+  void credentialledUrlsAreNotPutOnTheCommandLine() {
+    DsbulkPlan withKey = s3Plan(Map.of("s3.region", "eu-west-1", "s3.accessKeyId", "AKIAEXAMPLE"));
+    // DSBulk resolves -url ABOVE the -f file, so a masked URL here would override the real one.
+    assertThat(withKey.argv()).doesNotContain("-url");
+    assertThat(withKey.command()).doesNotContain("accessKeyId");
+
+    DsbulkPlan regionOnly = s3Plan(Map.of("s3.region", "eu-west-1"));
+    assertThat(regionOnly.argv()).containsSequence("-url", "s3://exports/users?region=eu-west-1");
+  }
+
+  @Test
+  @DisplayName("an s3:// URL with no region warns, and settings DSBulk 1.11 lacks are dropped loudly")
+  void s3WarningsAreExplicit() {
+    assertThat(s3Plan(Map.of()).warnings())
+        .anySatisfy(warning -> assertThat(warning).contains("s3:// URL needs a region"));
+    assertThat(s3Plan(Map.of("s3.region", "eu-west-1")).warnings())
+        .noneSatisfy(warning -> assertThat(warning).contains("needs a region"));
+
+    DsbulkPlan withGhosts = s3Plan(Map.of(
+        "s3.region", "eu-west-1", "s3.sessionToken", "tok", "s3.endpoint", "https://minio.local"));
+    assertThat(withGhosts.warnings())
+        .anySatisfy(warning -> assertThat(warning).contains("s3.sessionToken does not exist"))
+        .anySatisfy(warning -> assertThat(warning).contains("s3.endpoint does not exist"));
+    assertThat(withGhosts.hocon()).doesNotContain("sessionToken").doesNotContain("minio.local");
+  }
+
+  @Test
+  @DisplayName("a URL the user parameterised themselves wins over the form fields")
+  void explicitUrlParametersWin() {
+    DsbulkJobSpec spec = new DsbulkJobSpec(DsbulkOperation.UNLOAD, "demo", "users", null, "csv",
+        "s3://exports/users?region=us-east-2", null, false, null, 10, Map.of("s3.region", "eu-west-1"));
+    DsbulkPlan plan = DsbulkPlanner.plan(spec, DsbulkProbe.UNKNOWN, JOB_DIR, "UNLOAD_x");
+    assertThat(plan.hocon()).contains("s3://exports/users?region=us-east-2");
+    assertThat(plan.hocon()).doesNotContain("eu-west-1");
+    assertThat(plan.warnings()).noneSatisfy(w -> assertThat(w).contains("needs a region"));
+  }
+
+  @Test
+  @DisplayName("non-s3 URLs and empty inputs pass through the translation untouched")
+  void foldIsANoOpWhereItShouldBe() {
+    assertThat(DsbulkS3Url.fold(java.util.List.of())).isEmpty();
+    assertThat(DsbulkS3Url.fold(null)).isEmpty();
+    // A file:// or plain path sink keeps its URL, and the s3 fields are still dropped: they are not
+    // settings in ANY configuration, so writing them would be misleading wherever the sink points.
+    DsbulkPlan local = unloadPlan(Map.of("s3.region", "eu-west-1"));
+    assertThat(local.hocon()).contains("/data/exports/users").doesNotContain("dsbulk.s3.region");
+    assertThat(local.warnings()).noneSatisfy(w -> assertThat(w).contains("s3://"));
+
+    assertThat(DsbulkS3Url.withParameters("s3://b/o", Map.of())).isEqualTo("s3://b/o");
+    // A value with URL metacharacters must not silently break the query string.
+    assertThat(DsbulkS3Url.withParameters("s3://b/o", Map.of("secretAccessKey", "a/b+c=")))
+        .isEqualTo("s3://b/o?secretAccessKey=a%2Fb%2Bc%3D");
+    assertThat(DsbulkS3Url.withParameters("s3://b/o?", Map.of("region", "eu-west-1")))
+        .isEqualTo("s3://b/o?region=eu-west-1");
+    assertThat(DsbulkCommandBuilder.carriesCredentials(null)).isFalse();
   }
 
   @Test

@@ -2,6 +2,7 @@ package io.cassyx.bulk.impl.dsbulk;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import io.cassyx.bulk.api.dsbulk.DsbulkDistribution;
 import io.cassyx.bulk.api.dsbulk.DsbulkException;
@@ -177,9 +178,12 @@ class ProcessDsbulkRunnerTest {
           // the race entirely - sh becomes the sleep, so there is exactly one process to kill.
           //
           // The orphan scenario is a REAL product concern for `bin/dsbulk`, which is a shell
-          // script wrapping a JVM. It is tracked separately in docs/integration-todo.md
-          // ("Process-tree cancellation") because fixing it needs process-group handling and its
-          // own test - not a fixture tweak smuggled into a CI fix.
+          // script wrapping a JVM. It now has its own test, cancelKillsEveryDescendant.
+          //
+          // This one keeps the single-process shape ON PURPOSE: replacing the command bypasses
+          // inOwnProcessGroup(), so the runner has no group to signal and falls back to
+          // process.destroy(). That is exactly what happens on a platform without setsid, and it
+          // must keep working.
           builder.command(List.of("sh", "-c", "echo started >&2; exec sleep 60"));
           Process process = builder.start();
           started.countDown();
@@ -208,6 +212,94 @@ class ProcessDsbulkRunnerTest {
         .satisfies(result -> assertThat(result.succeeded()).isFalse());
     // Cancelling a job that is not running is false, not an exception.
     assertThat(runner.cancel(tmp)).isFalse();
+  }
+
+  @Test
+  @DisplayName("cancel kills the whole process TREE - no descendant survives, not just the parent")
+  void cancelKillsEveryDescendant() throws Exception {
+    // Without setsid there is no safe group to signal, so there is nothing to assert. The fallback
+    // (kill the direct child only) is what cancelKillsTheChild covers.
+    assumeTrue(ProcessDsbulkRunner.SETSID != null, "setsid is not available on this platform");
+
+    CountDownLatch started = new CountDownLatch(1);
+    List<Process> child = new CopyOnWriteArrayList<>();
+    ProcessDsbulkRunner runner = new ProcessDsbulkRunner(
+        distribution(), "512m", Duration.ofMillis(500),
+        builder -> {
+          // DELIBERATELY no `exec`. This reproduces the real shape of `$DSBULK_HOME/bin/dsbulk`:
+          // a shell script that FORKS a JVM. dash does not replace itself, so `sleep` is a
+          // grandchild that inherits the stderr pipe. Signalling only the direct child leaves it
+          // running against the user's cluster AND leaves run() blocked in readLine() forever,
+          // because the pipe never reaches EOF. Verified empirically before this fix: after
+          // process.destroy() the `sleep` was still in `ps` and the worker thread never returned.
+          builder.command(
+              ProcessDsbulkRunner.inOwnProcessGroup(List.of("sh", "-c", "echo started >&2; sleep 120")));
+          Process process = builder.start();
+          child.add(process);
+          started.countDown();
+          return process;
+        });
+
+    List<DsbulkResult> results = new ArrayList<>();
+    Thread worker = new Thread(() ->
+        results.add(runner.run(plan(DsbulkOperation.UNLOAD), tmp, Map.of(), DsbulkListener.noop())));
+    worker.start();
+
+    assertThat(started.await(10, TimeUnit.SECONDS)).isTrue();
+    Process parent = child.get(0);
+
+    // Wait for the grandchild to actually exist. Cancelling before the fork would prove nothing:
+    // that is precisely the TOCTOU race that made the descendants()-snapshot approach useless.
+    List<Long> descendants = List.of();
+    for (int i = 0; i < 100 && descendants.isEmpty(); i++) {
+      descendants = parent.descendants().map(ProcessHandle::pid).toList();
+      if (descendants.isEmpty()) {
+        Thread.sleep(50);
+      }
+    }
+    assertThat(descendants).as("the child forked a grandchild, as bin/dsbulk does").isNotEmpty();
+
+    assertThat(runner.cancel(tmp)).as("cancel() found and signalled the group").isTrue();
+
+    // run() returning at all is itself an assertion: it only reaches waitFor() at EOF on the
+    // child's stderr, and a surviving descendant holds that pipe open.
+    worker.join(TimeUnit.SECONDS.toMillis(20));
+    assertThat(worker.isAlive()).as("run() returned, so nothing is still holding the stderr pipe").isFalse();
+    assertThat(results).singleElement().satisfies(result -> assertThat(result.succeeded()).isFalse());
+
+    assertThat(parent.isAlive()).as("the direct child is gone").isFalse();
+    for (long pid : descendants) {
+      assertThat(isRunning(pid))
+          .as("descendant %d must not survive cancellation", pid)
+          .isFalse();
+    }
+    assertThat(ProcessDsbulkRunner.groupIsAlive(processGroupOf(parent.pid()))).isFalse();
+  }
+
+  /**
+   * {@code true} when {@code pid} is a live process.
+   *
+   * <p>Asked of {@code ps} rather than of {@link ProcessHandle}: an orphan reparented to a pid 1
+   * that does not reap stays as a zombie with a live {@code /proc} entry, and a zombie holds no file
+   * descriptors and consumes nothing. Dead is dead; it is a survivor we are looking for.
+   */
+  private static boolean isRunning(long pid) throws Exception {
+    String state = capture(List.of("ps", "-o", "stat=", "-p", Long.toString(pid))).trim();
+    return !state.isEmpty() && state.charAt(0) != 'Z';
+  }
+
+  private static long processGroupOf(long pid) throws Exception {
+    String pgid = capture(List.of("ps", "-o", "pgid=", "-p", Long.toString(pid))).trim();
+    return pgid.isEmpty() ? -1 : Long.parseLong(pgid);
+  }
+
+  private static String capture(List<String> command) throws Exception {
+    Process process = new ProcessBuilder(command)
+        .redirectError(ProcessBuilder.Redirect.DISCARD)
+        .start();
+    String out = new String(process.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+    process.waitFor(5, TimeUnit.SECONDS);
+    return out;
   }
 
   @Test

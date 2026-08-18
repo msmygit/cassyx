@@ -17,7 +17,6 @@ import java.util.Map;
 import java.util.Optional;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -55,17 +54,12 @@ public class JobController {
   private final JobRepository repository;
   private final JobService nativeJobs;
   private final DsbulkJobEventStream events;
-  private final ObjectProvider<DsbulkJobService> dsbulkJobs;
 
   public JobController(
-      JobRepository repository,
-      JobService nativeJobs,
-      DsbulkJobEventStream events,
-      ObjectProvider<DsbulkJobService> dsbulkJobs) {
+      JobRepository repository, JobService nativeJobs, DsbulkJobEventStream events) {
     this.repository = repository;
     this.nativeJobs = nativeJobs;
     this.events = events;
-    this.dsbulkJobs = dsbulkJobs;
   }
 
   /* -------------------------------------------------------------------------------- list */
@@ -129,13 +123,11 @@ public class JobController {
     if (isTerminal(job.status())) {
       throw new JobStateException("Job " + jobId + " already finished as " + job.status() + ".");
     }
-    // Native first: it owns the in-memory cancellation flag and answers instantly if it is its job.
-    if (!nativeJobs.requestCancel(jobId)) {
-      DsbulkJobService dsbulk = dsbulkJobs.getIfAvailable();
-      if (dsbulk != null) {
-        dsbulk.cancel(jobId);
-      }
-    }
+    // ONE cancellation path. JobService routes on the row's engine and reaches DsbulkJobService for
+    // a DSBULK job; doing that routing here as well would be two places that have to agree about
+    // which engine owns a job, and the last time they disagreed the endpoint answered 202 without
+    // killing anything.
+    nativeJobs.requestCancel(jobId);
     return ResponseEntity.accepted().body(repository.find(jobId).orElse(job));
   }
 

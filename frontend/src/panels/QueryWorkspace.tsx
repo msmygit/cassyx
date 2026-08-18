@@ -11,12 +11,15 @@ import { QueryLibraryPanel } from './QueryLibraryPanel';
 import { checkRowEditability, getQueryTrace } from '../query/api';
 import { useQueryRunner, type ScriptRunMode } from '../query/useQueryRunner';
 import type { QueryTrace } from '../query/types';
+import type { CqlCompletionSchema } from '../query/cqlLanguage';
 
 export interface QueryWorkspaceProps {
   connectionId: string | null;
   value: string;
   onChange: (value: string) => void;
   defaultKeyspace?: string;
+  /** `keyspace.table` → columns, built from the live catalog by the shell. */
+  completionSchema?: CqlCompletionSchema;
 }
 
 /**
@@ -30,6 +33,7 @@ export function QueryWorkspace({
   value,
   onChange,
   defaultKeyspace,
+  completionSchema,
 }: QueryWorkspaceProps) {
   const [options, setOptions] = useState<StatementOptions>(DEFAULT_STATEMENT_OPTIONS);
   const [tab, setTab] = useState(0);
@@ -117,6 +121,7 @@ export function QueryWorkspace({
           running={runner.running}
           options={options}
           onOptionsChange={setOptions}
+          completionSchema={completionSchema}
           defaultKeyspace={defaultKeyspace}
           onOpenBatchBuilder={() => setBatchOpen(true)}
         />

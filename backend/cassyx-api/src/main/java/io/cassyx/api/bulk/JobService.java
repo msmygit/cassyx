@@ -74,8 +74,12 @@ public class JobService {
   /** Progress is published at most this often - the contract says roughly 1/s. */
   static final long PROGRESS_INTERVAL_MILLIS = 1000;
 
+  /** Value of {@code cassyx_job.engine} for rows the DSBulk half of the substrate owns. */
+  static final String DSBULK_ENGINE = "DSBULK";
+
   private final JobRepository repository;
   private final DsbulkJobEventStream events;
+  private final DsbulkJobService dsbulk;
   private final SessionRegistry sessions;
   private final ExecutorService executor;
   private final ObjectMapper json;
@@ -90,6 +94,7 @@ public class JobService {
   public JobService(
       JobRepository repository,
       DsbulkJobEventStream events,
+      DsbulkJobService dsbulkJobs,
       SessionRegistry sessionRegistry,
       ExecutorService nativeJobExecutor,
       ObjectMapper json,
@@ -98,6 +103,7 @@ public class JobService {
       @Value("${cassyx.jobs.max-concurrent:4}") int maxConcurrent) {
     this.repository = repository;
     this.events = events;
+    this.dsbulk = dsbulkJobs;
     this.sessions = sessionRegistry;
     this.executor = nativeJobExecutor;
     this.json = json;
@@ -276,14 +282,23 @@ public class JobService {
   /* ------------------------------------------------------------------------ cancel/delete */
 
   /**
-   * Requests cancellation of a running native job.
+   * Requests cancellation of a running job, whichever engine is running it.
    *
-   * @return {@code true} if this service owns the job and has signalled it
+   * <p><b>Routes on the row's engine, and that routing is the whole point.</b> A {@code DSBULK} job
+   * is a child process; this service's {@link AtomicBoolean} means nothing to it. Before the
+   * delegation existed, {@code POST /api/jobs/{id}/cancel} set a flag nobody read and answered 202,
+   * so the UI showed the job stopped while DSBulk carried on writing to the user's cluster. A cancel
+   * that reports success without stopping anything is worse than one that fails loudly.
+   *
+   * @return {@code true} if some engine owns the job and has signalled it
    */
   public boolean requestCancel(String jobId) {
+    if (DSBULK_ENGINE.equalsIgnoreCase(engineOf(jobId)) && dsbulk.cancel(jobId)) {
+      return true;
+    }
     AtomicBoolean flag = cancellations.get(jobId);
     if (flag == null) {
-      return false;
+      return cancelOrphan(jobId);
     }
     flag.set(true);
     Future<?> future = inFlight.get(jobId);
@@ -292,6 +307,29 @@ public class JobService {
       cancel(jobId, clock.instant());
     }
     return true;
+  }
+
+  /**
+   * Finishes a non-terminal row that no engine is running - typically one left {@code RUNNING} by a
+   * restart that killed its worker.
+   *
+   * <p>The contract says the job reaches {@code CANCELLED} shortly after a cancel request. Nothing
+   * else is ever going to move this row, so leaving it {@code RUNNING} forever while answering 202
+   * would be the same lie in a different place.
+   */
+  private boolean cancelOrphan(String jobId) {
+    Job job = repository.find(jobId).orElse(null);
+    if (job == null || JobController.isTerminal(job.status())) {
+      return false;
+    }
+    LOG.warn("Job {} is {} but no engine is running it; recording it CANCELLED", jobId, job.status());
+    cancel(jobId, clock.instant());
+    return true;
+  }
+
+  /** The {@code engine} column of the job row, or {@code null} when there is no such row. */
+  private String engineOf(String jobId) {
+    return repository.findRow(jobId).map(row -> JobRepository.string(row, "engine")).orElse(null);
   }
 
   /** Drops the retained logs, the artifact directory and the replay buffer for a deleted job. */

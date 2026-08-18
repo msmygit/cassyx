@@ -86,10 +86,37 @@ public final class DsbulkCommandBuilder {
     return "'" + arg.replace("'", "'\\''") + "'";
   }
 
-  /** The connector URL, whichever connector is in play. */
+  /**
+   * The connector URL, whichever connector is in play - unless it carries S3 credentials.
+   *
+   * <p>An {@code s3://} URL with {@code accessKeyId}/{@code secretAccessKey} query parameters
+   * (see {@link DsbulkS3Url}) is deliberately kept OFF the command line, for two reasons that both
+   * matter:
+   *
+   * <ul>
+   *   <li>a process command line is readable by every user on the host through {@code ps}, so a
+   *       secret placed there leaks to anyone with a shell;
+   *   <li>DSBulk resolves command-line options ABOVE the {@code -f} file, so the masked URL that
+   *       appears in the preview would override the real one in the generated configuration and the
+   *       job would authenticate with {@code ***}.
+   * </ul>
+   *
+   * <p>The URL is still in the {@code -f} file, which is where it belongs: mode-restricted, on disk,
+   * and part of the job's reproducible artifact.
+   */
   static String urlSetting(List<DsbulkSetting> settings) {
     String csv = valueOf(settings, "connector.csv.url");
-    return csv != null ? csv : valueOf(settings, "connector.json.url");
+    String url = csv != null ? csv : valueOf(settings, "connector.json.url");
+    return carriesCredentials(url) ? null : url;
+  }
+
+  /** {@code true} when the URL's query string carries an S3 access key or secret. */
+  static boolean carriesCredentials(String url) {
+    if (url == null) {
+      return false;
+    }
+    String lower = url.toLowerCase(java.util.Locale.ROOT);
+    return lower.contains("accesskeyid=") || lower.contains("secretaccesskey=");
   }
 
   static String valueOf(List<DsbulkSetting> settings, String path) {
