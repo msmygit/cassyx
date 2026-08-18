@@ -28,6 +28,7 @@ import java.util.function.Function;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.ProblemDetail;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 /**
@@ -52,6 +53,7 @@ public class ConnectionSessionService {
   private final Function<SshTunnelSpec, SshTunnel> tunnelFactory;
   private final Clock clock;
 
+  @Autowired
   public ConnectionSessionService(
       ConnectionService connections,
       ConnectionMapper mapper,

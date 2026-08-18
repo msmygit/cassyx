@@ -7,6 +7,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -19,6 +20,7 @@ public class ConnectionService {
   private final SessionRegistry sessions;
   private final Clock clock;
 
+  @Autowired
   public ConnectionService(
       ConnectionRepository repository, ConnectionMapper mapper, SessionRegistry sessions) {
     this(repository, mapper, sessions, Clock.systemUTC());
