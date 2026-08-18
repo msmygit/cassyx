@@ -42,21 +42,34 @@ public interface Encoder {
    * Everything an encoder needs that is not the row itself.
    *
    * @param columns projection order; encoders must honour it
+   * @param columnTypes CQL type name per column, for the typed formats (Parquet, XLSX). Optional -
+   *     an empty map means "treat everything as text"
    * @param options format-specific options (delimiter, header, compression, ...)
    */
-  record EncoderContext(List<String> columns, Map<String, String> options) {
+  record EncoderContext(
+      List<String> columns, Map<String, String> columnTypes, Map<String, String> options) {
 
     public EncoderContext {
       columns = columns == null ? List.of() : List.copyOf(columns);
+      columnTypes = columnTypes == null ? Map.of() : Map.copyOf(columnTypes);
       options = options == null ? Map.of() : Map.copyOf(options);
     }
 
     public static EncoderContext of(List<String> columns) {
-      return new EncoderContext(columns, Map.of());
+      return new EncoderContext(columns, Map.of(), Map.of());
+    }
+
+    public static EncoderContext of(List<String> columns, Map<String, String> options) {
+      return new EncoderContext(columns, Map.of(), options);
     }
 
     public String option(String key, String defaultValue) {
       return options.getOrDefault(key, defaultValue);
+    }
+
+    /** Lower-case CQL type name of {@code column} ({@code text}, {@code bigint}, ...). */
+    public String columnType(String column) {
+      return columnTypes.getOrDefault(column, "text");
     }
   }
 

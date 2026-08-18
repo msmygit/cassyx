@@ -16,6 +16,14 @@ public interface Sink {
   String scheme();
 
   /**
+   * Whether this sink handles {@code scheme}. Override when one sink covers several schemes (the
+   * HTTP sink handles both {@code http} and {@code https}).
+   */
+  default boolean supports(String scheme) {
+    return scheme().equalsIgnoreCase(scheme);
+  }
+
+  /**
    * Opens an output stream for one output part.
    *
    * @param target destination URI, e.g. {@code file:///data/out} or {@code s3://bucket/prefix}
@@ -27,7 +35,7 @@ public interface Sink {
 
   static Sink forScheme(String scheme) {
     for (Sink sink : ServiceLoader.load(Sink.class)) {
-      if (sink.scheme().equalsIgnoreCase(scheme)) {
+      if (sink.supports(scheme)) {
         return sink;
       }
     }

@@ -1,1 +1,6 @@
 io.cassyx.bulk.impl.CsvEncoder
+io.cassyx.bulk.impl.JsonEncoder
+io.cassyx.bulk.impl.JsonLinesEncoder
+io.cassyx.bulk.impl.ParquetEncoder
+io.cassyx.bulk.impl.XmlEncoder
+io.cassyx.bulk.impl.XlsxEncoder

@@ -5996,7 +5996,7 @@ export interface components {
             urlfile?: string;
             /** @example **\/*.csv */
             fileNamePattern?: string;
-            /** @example output-%0,6d.csv */
+            /** @example output-%06d.csv */
             fileNameFormat?: string;
             /** @example false */
             recursive?: boolean;
@@ -6056,7 +6056,7 @@ export interface components {
             urlfile?: string;
             /** @example **\/*.json */
             fileNamePattern?: string;
-            /** @example output-%0,6d.json */
+            /** @example output-%06d.json */
             fileNameFormat?: string;
             /**
              * @example MULTI_DOCUMENT
@@ -6111,7 +6111,10 @@ export interface components {
              * @example true
              */
             nullToUnset?: boolean;
-            /** @example false */
+            /**
+             * @description Upstream DSBulk default is `true`. Examples here must match the shipped defaults — a wrong example gets copied into implementations as if it were one.
+             * @example true
+             */
             allowExtraFields?: boolean;
             /** @example false */
             allowMissingFields?: boolean;
@@ -6379,7 +6382,7 @@ export interface components {
             connectionPoolLocalSize?: number;
             /** @example 1 */
             connectionPoolRemoteSize?: number;
-            /** @example com.datastax.oss.dsbulk.workflow.api.utils.MultipleRetryPolicy */
+            /** @example com.datastax.oss.dsbulk.workflow.commons.policies.retry.MultipleRetryPolicy */
             retryPolicyClass?: string;
             /** @example 10 */
             maxRetries?: number;
@@ -6421,7 +6424,7 @@ export interface components {
              *       "partitions"
              *     ]
              */
-            modes?: ("global" | "ranges" | "hosts" | "partitions" | "biggest-partitions")[];
+            modes?: ("global" | "ranges" | "hosts" | "partitions")[];
             /**
              * @description Top-N for the largest-partitions report.
              * @example 10
@@ -6717,7 +6720,7 @@ export interface components {
              *       "partitions"
              *     ]
              */
-            modes?: ("global" | "ranges" | "hosts" | "partitions" | "biggest-partitions")[];
+            modes?: ("global" | "ranges" | "hosts" | "partitions")[];
             /**
              * @default 10
              * @example 10

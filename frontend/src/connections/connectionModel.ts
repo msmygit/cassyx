@@ -4,6 +4,7 @@
 import type {
   AstraBundleDatacenter,
   ConnectionMode,
+  ConnectionRequest,
   ContactPoint,
   ScbAcquisitionMode,
   ScbType,
@@ -197,4 +198,76 @@ export function domainsForRegion(bundles: AstraBundleDatacenter[], region: strin
 /** Astra databases that can actually be connected to right now. */
 export function isConnectableDatabase(status: string): boolean {
   return status === 'ACTIVE' || status === 'MAINTENANCE';
+}
+
+/** The driver's default request timeout, mirrored from `ConnectionRequest.requestTimeoutMillis`. */
+export const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
+
+const PROTOCOL_VERSIONS = ['V3', 'V4', 'V5', 'DSE_V1', 'DSE_V2'] as const;
+type ProtocolVersion = (typeof PROTOCOL_VERSIONS)[number];
+
+function parseProtocolVersion(raw: string): ProtocolVersion | undefined {
+  const value = raw.trim().toUpperCase();
+  return (PROTOCOL_VERSIONS as readonly string[]).includes(value)
+    ? (value as ProtocolVersion)
+    : undefined;
+}
+
+/** Blank string → `undefined`, so an untouched optional field is omitted rather than sent empty. */
+function optional(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+/**
+ * Form state → the contract's `ConnectionRequest` (plan §3).
+ *
+ * Pure: no network, no React. Every secret is passed through untouched and every non-secret is
+ * normalised, so the shape the server sees is the shape the tests assert.
+ *
+ * An empty secret field is sent as `undefined`, never `''`. The contract reads `undefined` as
+ * "preserve what is stored" and `''` as "clear it" — and since the browser never receives the
+ * stored secret, an untouched edit form shows an empty box for a password that very much exists.
+ * Sending `''` there would silently wipe it. Clearing is a deliberate action the UI must offer
+ * separately.
+ */
+export function toConnectionRequest(form: ConnectionFormState): ConnectionRequest {
+  const secret = (value: string): string | undefined => (value ? value : undefined);
+
+  const base = {
+    name: form.name.trim(),
+    mode: form.mode,
+    requestTimeoutMillis: DEFAULT_REQUEST_TIMEOUT_MS,
+  };
+
+  if (form.mode === 'ASTRA') {
+    return {
+      ...base,
+      defaultKeyspace: optional(form.astra.keyspace),
+      astra: {
+        astraToken: secret(form.astra.astraToken),
+        scbMode: form.astra.acquisitionMode,
+        databaseId: optional(form.astra.databaseId),
+        region: optional(form.astra.region),
+        scbType: form.astra.scbType,
+        // The contract rejects a domain on a `default` bundle, so only send it where it belongs.
+        domain: form.astra.scbType === 'custom' ? optional(form.astra.customDomain) : undefined,
+        scbPath:
+          form.astra.acquisitionMode === 'PATH' ? optional(form.astra.bundlePath) : undefined,
+      },
+    };
+  }
+
+  if (form.mode === 'ADVANCED') {
+    return { ...base, advancedConfig: form.advanced.applicationConf };
+  }
+
+  return {
+    ...base,
+    contactPoints: parseContactPoints(form.cassandra.contactPoints),
+    localDatacenter: optional(form.cassandra.localDatacenter),
+    username: optional(form.cassandra.username),
+    password: secret(form.cassandra.password),
+    protocolVersion: parseProtocolVersion(form.cassandra.protocolVersion),
+  };
 }

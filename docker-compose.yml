@@ -60,6 +60,10 @@ services:
       timeout: 10s
       retries: 40
       start_period: 60s
+    # `nodetool drain` in the entrypoint's SIGTERM trap needs time to flush
+    # memtables. Docker's 10s default kills it mid-drain, leaving a commitlog
+    # that crashes the next start when it replays vector/SAI mutations.
+    stop_grace_period: 120s
     restart: unless-stopped
 
   # ---------------------------------------------------------------------------
@@ -132,7 +136,8 @@ services:
       # through the browser (§2).
       - ./.cassyx-out:/out
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/api/health >/dev/null || exit 1"]
+      # 127.0.0.1 for the same IPv6 reason as the frontend healthcheck below.
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/api/health >/dev/null || exit 1"]
       interval: 5s
       timeout: 5s
       retries: 60
@@ -155,7 +160,11 @@ services:
     ports:
       - "${CASSYX_WEB_PORT:-8080}:8080"
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz >/dev/null 2>&1 || exit 1"]
+      # 127.0.0.1, NOT localhost. In these images `localhost` resolves to ::1 first, and nginx
+      # listens on 0.0.0.0 only, so the IPv6 attempt is refused and the container never reports
+      # healthy even though it is serving fine. Verified: wget to 127.0.0.1 exits 0, the identical
+      # request to localhost exits 1 with "Connection refused".
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz >/dev/null 2>&1 || exit 1"]
       interval: 5s
       timeout: 5s
       retries: 30

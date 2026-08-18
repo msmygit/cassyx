@@ -39,12 +39,28 @@ function mockApi(overrides: Partial<AstraApi> = {}): AstraApi {
   };
 }
 
-function Harness({ api, initial }: { api: AstraApi; initial?: Partial<AstraFormState> }) {
+function Harness({
+  api,
+  initial,
+  connectionId,
+}: {
+  api: AstraApi;
+  initial?: Partial<AstraFormState>;
+  /** Absent while creating — the bundle endpoints are keyed by connection id. */
+  connectionId?: string;
+}) {
   const [value, setValue] = useState<AstraFormState>({
     ...emptyConnectionForm().astra,
     ...initial,
   });
-  return <AstraConnectionForm value={value} onChange={setValue} api={api} />;
+  return (
+    <AstraConnectionForm
+      value={value}
+      onChange={setValue}
+      api={api}
+      {...(connectionId ? { connectionId } : {})}
+    />
+  );
 }
 
 async function selectOption(
@@ -126,13 +142,40 @@ describe('AstraConnectionForm', () => {
   it('offers a re-download action for rotated bundles', async () => {
     const user = userEvent.setup();
     const api = mockApi();
-    renderWithProviders(<Harness api={api} initial={{ astraToken: TOKEN }} />);
+    renderWithProviders(
+      <Harness api={api} initial={{ astraToken: TOKEN }} connectionId="c1" />,
+    );
 
     await user.click(screen.getByTestId('astra-load-databases'));
     await selectOption(user, 'astra-database-select', /prod-vectors/);
     await user.click(await screen.findByTestId('astra-redownload'));
 
-    await waitFor(() => expect(api.redownload).toHaveBeenCalledWith('db-active', TOKEN));
+    // The refreshed bundle is stored against a connection, so the id travels with the request.
+    await waitFor(() =>
+      expect(api.redownload).toHaveBeenCalledWith('db-active', TOKEN, {
+        connectionId: 'c1',
+        region: '',
+        scbType: 'default',
+        domain: '',
+      }),
+    );
+  });
+
+  /**
+   * The bundle is stored encrypted against a connection row, so there is nowhere to put it before
+   * the connection exists. Offering the button anyway would produce a 404 the user cannot act on.
+   */
+  it('cannot re-download before the connection has been saved', async () => {
+    const user = userEvent.setup();
+    const api = mockApi();
+    renderWithProviders(<Harness api={api} initial={{ astraToken: TOKEN }} />);
+
+    await user.click(screen.getByTestId('astra-load-databases'));
+    await selectOption(user, 'astra-database-select', /prod-vectors/);
+
+    expect(await screen.findByTestId('astra-redownload')).toBeDisabled();
+    expect(screen.getByText(/Save the connection first/i)).toBeInTheDocument();
+    expect(api.redownload).not.toHaveBeenCalled();
   });
 
   it('never leaks the token into an error message', async () => {

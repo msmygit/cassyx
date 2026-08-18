@@ -14,8 +14,13 @@
 
   <properties>
     <checkstyle.config.path>${project.parent.basedir}/config/checkstyle.xml</checkstyle.config.path>
-    <!-- section 11.1 gate: 85% + mutation testing. -->
+    <!-- section 11.1 gate: 85% + mutation testing.
+         Phase 1 workstream A has flipped the skip off: this module now carries the session
+         registry, the AES-256-GCM cipher, the capability matrix and the SSH tunnel, and the gate
+         is what stops that lot regressing. Do not put it back. -->
     <cassyx.coverage.line>0.85</cassyx.coverage.line>
+    <cassyx.coverage.skip>false</cassyx.coverage.skip>
+    <sshd.version>2.15.0</sshd.version>
   </properties>
 
   <dependencies>
@@ -31,6 +36,15 @@
     <dependency>
       <groupId>com.fasterxml.jackson.core</groupId>
       <artifactId>jackson-databind</artifactId>
+    </dependency>
+    <!-- SSH local port forward before session build (plan section 3, "SSH tunnel support").
+         Apache MINA sshd rather than JSch: JSch upstream is abandoned, and MINA ships an
+         embeddable SERVER as well as a client, which is what lets MinaSshTunnel be covered by a
+         real end-to-end test (MinaSshTunnelTest) instead of a mock. Still no Spring, no web layer. -->
+    <dependency>
+      <groupId>org.apache.sshd</groupId>
+      <artifactId>sshd-core</artifactId>
+      <version>${sshd.version}</version>
     </dependency>
 
     <!-- The shared Testcontainers singleton (section 11.2) lives in this module's test sources and
@@ -48,6 +62,18 @@
     <dependency>
       <groupId>ch.qos.logback</groupId>
       <artifactId>logback-classic</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <!-- Driver-facing classes (session factory, capability probe, paging) are exercised against
+         mocked driver interfaces so the 85% gate does not depend on Docker being present. -->
+    <dependency>
+      <groupId>org.mockito</groupId>
+      <artifactId>mockito-core</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.mockito</groupId>
+      <artifactId>mockito-junit-jupiter</artifactId>
       <scope>test</scope>
     </dependency>
   </dependencies>

@@ -19,8 +19,25 @@ public interface CapabilityProbe {
     return 100;
   }
 
-  /** @return the detected capabilities, or empty if this probe does not recognise the cluster */
-  Optional<ClusterCapabilities> probe(CqlSession session);
+  /**
+   * Sniffs the cluster.
+   *
+   * @param hint what the connection settings say the target is - {@link ClusterFlavor#ASTRA} when
+   *     the connection uses a secure connect bundle, for instance. A hint is worth having because
+   *     Astra deliberately looks like stock Cassandra over CQL; probes may ignore it, but must not
+   *     trust it over a contradicting on-the-wire signal.
+   * @return the detected capabilities, or empty if this probe does not recognise the cluster
+   */
+  Optional<ClusterProbeResult> probeCluster(CqlSession session, ClusterFlavor hint);
+
+  default Optional<ClusterProbeResult> probeCluster(CqlSession session) {
+    return probeCluster(session, null);
+  }
+
+  /** The narrow view, for callers that only need feature gating. */
+  default Optional<ClusterCapabilities> probe(CqlSession session) {
+    return probeCluster(session, null).map(ClusterProbeResult::capabilities);
+  }
 
   /** Loads all probes visible to this module's class loader, ordered by {@link #priority()}. */
   static ServiceLoader<CapabilityProbe> load() {

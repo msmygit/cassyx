@@ -38,4 +38,40 @@ if [ -f "$CONF" ]; then
   set_yaml user_defined_functions_enabled "${CASSANDRA_UDF_ENABLED:-true}"
 fi
 
-exec docker-entrypoint.sh "$@"
+# -----------------------------------------------------------------------------
+# Graceful shutdown: drain before stopping.
+#
+# Without this, a `docker compose stop` kills Cassandra with un-flushed memtables
+# and the next start replays the commitlog. Replaying mutations against a
+# `vector<float, N>` column with an SAI index crashes Cassandra 5.0 outright:
+#
+#   IllegalStateException: Number of outstanding pooled objects has gone beyond
+#   the limit of 9
+#     at io.github.jbellis.jvector.util.PoolingSupport$ThreadPooling.get
+#     at org.apache.cassandra.index.sai.memory.VectorMemoryIndex.index
+#
+# jvector's per-thread pool is sized for the write path, but commitlog replay
+# fans out across more SEPWorker threads than that pool allows. The node then
+# fails to start and the volume is effectively bricked — which is exactly what a
+# `make seed` followed by a restart produces.
+#
+# `nodetool drain` flushes memtables and stops accepting writes, so there is
+# nothing left to replay. This is correct Cassandra shutdown practice anyway;
+# the vector crash just makes skipping it fatal rather than merely slow.
+# -----------------------------------------------------------------------------
+drain_and_exit() {
+  echo "[entrypoint] SIGTERM — draining before shutdown (avoids commitlog replay)"
+  nodetool drain 2>/dev/null || echo "[entrypoint] drain failed; continuing to stop"
+  if [ -n "${CASSANDRA_PID:-}" ]; then
+    kill -TERM "$CASSANDRA_PID" 2>/dev/null || true
+    wait "$CASSANDRA_PID" 2>/dev/null || true
+  fi
+  exit 0
+}
+trap drain_and_exit TERM INT
+
+# Run the stock entrypoint in the background so the trap above can fire; `wait`
+# without `exec` keeps this script as PID 1 and able to receive the signal.
+docker-entrypoint.sh "$@" &
+CASSANDRA_PID=$!
+wait "$CASSANDRA_PID"

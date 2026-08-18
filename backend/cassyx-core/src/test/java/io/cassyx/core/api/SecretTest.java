@@ -24,15 +24,11 @@ class SecretTest {
   @Test
   void jacksonSerialisesAsNullEvenInsideADto() throws Exception {
     ConnectionSpec spec =
-        new ConnectionSpec(
-            "prod",
-            List.of("10.0.0.1:9042"),
-            "dc1",
-            "svc",
-            Secret.of(SENTINEL),
-            null,
-            null,
-            null);
+        ConnectionSpec.builder("prod")
+            .contactPoints(List.of("10.0.0.1:9042"))
+            .localDatacenter("dc1")
+            .credentials("svc", Secret.of(SENTINEL))
+            .build();
 
     String json = new ObjectMapper().writeValueAsString(spec);
 

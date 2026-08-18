@@ -9,7 +9,15 @@ spring:
   # H2 in FILE mode - connections, saved scripts, history, jobs and the license live here and must
   # survive a container restart. The file sits on a mounted volume in Docker Compose.
   datasource:
-    url: jdbc:h2:file:${CASSYX_DB_PATH:./data/cassyx};AUTO_SERVER=TRUE;DB_CLOSE_ON_EXIT=FALSE
+    # DB_CLOSE_ON_EXIT=FALSE lets Spring close the pool on its own shutdown hook instead of H2
+    # yanking the database out from under it.
+    #
+    # AUTO_SERVER=TRUE is deliberately NOT set: H2 2.3 rejects the two together with
+    # `Feature not supported: "AUTO_SERVER=TRUE && DB_CLOSE_ON_EXIT=FALSE"` and refuses every
+    # connection, so Flyway fails before the app can start. AUTO_SERVER exists to let a second
+    # process attach to the same file; cassyx is a single process per data directory, so it buys
+    # nothing here and would open an extra listening port in the container.
+    url: jdbc:h2:file:${CASSYX_DB_PATH:./data/cassyx};DB_CLOSE_ON_EXIT=FALSE
     driver-class-name: org.h2.Driver
     username: ${CASSYX_DB_USER:cassyx}
     password: ${CASSYX_DB_PASSWORD:cassyx}

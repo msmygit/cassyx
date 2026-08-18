@@ -1,5 +1,8 @@
 package io.cassyx.bulk.api;
 
+import io.cassyx.bulk.impl.EvenTokenRangeSplitter;
+import io.cassyx.bulk.impl.TokenRangeCountEngine;
+import io.cassyx.bulk.impl.TokenRangeUnloadEngine;
 import java.util.List;
 
 /**
@@ -39,5 +42,32 @@ public final class BulkFactory {
 
   public static List<Sink> sinks() {
     return Sink.available();
+  }
+
+  /**
+   * The token-range parallel unload engine of plan section 5.2.
+   *
+   * <pre>{@code
+   * UnloadResult result = BulkFactory.unloadEngine()
+   *     .unload(session,
+   *             UnloadRequest.of("demo", "users", "csv", "/out"),
+   *             progress -> System.out.println(progress.fraction()));
+   * }</pre>
+   *
+   * <p>A {@link com.datastax.oss.driver.api.core.CqlSession} is the only thing it needs - no Spring,
+   * no session registry, no web layer (plan section 2.1).
+   */
+  public static UnloadEngine unloadEngine() {
+    return new TokenRangeUnloadEngine();
+  }
+
+  /** Native count / statistics over the same token-range plan (plan section 5.4). */
+  public static CountEngine countEngine() {
+    return new TokenRangeCountEngine();
+  }
+
+  /** The oversplit + {@code unwrap()} splitter, exposed for pre-flight estimates and tests. */
+  public static TokenRangeSplitter tokenRangeSplitter() {
+    return new EvenTokenRangeSplitter();
   }
 }

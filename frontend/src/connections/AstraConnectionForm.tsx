@@ -43,6 +43,11 @@ export interface AstraConnectionFormProps {
   errors?: ValidationErrors;
   /** Selected bundle file for UPLOAD mode; owned by the parent so it can build the multipart body. */
   onBundleFile?: (file: File | null) => void;
+  /**
+   * The saved connection the bundle belongs to. Absent while creating: the bundle endpoints are
+   * keyed by connection id, so "re-download" only exists once the connection has been saved.
+   */
+  connectionId?: string;
   api?: AstraApi;
 }
 
@@ -80,6 +85,7 @@ export function AstraConnectionForm({
   onChange,
   errors = {},
   onBundleFile,
+  connectionId,
   api = defaultAstraApi,
 }: AstraConnectionFormProps) {
   const [databases, setDatabases] = useState<AstraDatabase[] | null>(null);
@@ -136,11 +142,16 @@ export function AstraConnectionForm({
   };
 
   const refreshBundle = async () => {
-    if (!value.databaseId) return;
+    if (!value.databaseId || !connectionId) return;
     setRemoteError(null);
     setLoading('refresh');
     try {
-      await api.redownload(value.databaseId, value.astraToken);
+      await api.redownload(value.databaseId, value.astraToken, {
+        connectionId,
+        region: value.region,
+        scbType: value.scbType,
+        domain: value.customDomain,
+      });
       setBundles(await api.listBundles(value.databaseId, value.astraToken));
       setRefreshedAt(new Date().toISOString());
     } catch (error) {
@@ -357,15 +368,15 @@ export function AstraConnectionForm({
                     loading === 'refresh' ? <CircularProgress size={14} /> : <RefreshRoundedIcon />
                   }
                   onClick={() => void refreshBundle()}
-                  disabled={loading !== null}
+                  disabled={loading !== null || !connectionId}
                   data-testid="astra-redownload"
                 >
                   Re-download bundle
                 </Button>
                 <FormHelperText>
-                  Astra rotates bundles. A stale one fails with a confusing TLS error rather than an
-                  obvious one — re-download if a previously working connection starts failing
-                  handshake.
+                  {connectionId
+                    ? 'Astra rotates bundles. A stale one fails with a confusing TLS error rather than an obvious one — re-download if a previously working connection starts failing handshake.'
+                    : 'Save the connection first; the bundle is stored encrypted against it.'}
                   {refreshedAt ? ` Last refreshed ${refreshedAt}.` : ''}
                 </FormHelperText>
               </Box>
