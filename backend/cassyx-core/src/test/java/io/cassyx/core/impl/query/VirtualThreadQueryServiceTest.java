@@ -328,6 +328,64 @@ class VirtualThreadQueryServiceTest {
         .hasMessageContaining("at least one statement");
   }
 
+
+  @Test
+  @DisplayName("Column metadata is enriched from live schema: key columns, kinds, and editability")
+  void enrichesColumnsFromSchemaMetadata() {
+    CqlSession session =
+        FakeSchema.table("demo", "users")
+            .partitionKey("user_id", DataTypes.UUID)
+            .clustering("created_at", DataTypes.TIMESTAMP)
+            .regular("email", DataTypes.TEXT)
+            .staticColumn("tenant", DataTypes.TEXT)
+            .session();
+    DriverContext context = mock(DriverContext.class);
+    lenient().when(context.getProtocolVersion()).thenReturn(ProtocolVersion.V5);
+    lenient().when(session.getContext()).thenReturn(context);
+    stubExecute(
+        session,
+        page(List.of(), null, null, false, "user_id", "created_at", "email", "tenant"));
+
+    ResultPage result = service.execute(session, QuerySpec.of("SELECT * FROM demo.users"));
+
+    assertThat(result.columns()).extracting(io.cassyx.core.api.query.ColumnInfo::name)
+        .containsExactly("user_id", "created_at", "email", "tenant");
+    assertThat(result.columns()).extracting(io.cassyx.core.api.query.ColumnInfo::kind)
+        .containsExactly("PARTITION_KEY", "CLUSTERING", "REGULAR", "STATIC");
+    assertThat(result.columns()).extracting(io.cassyx.core.api.query.ColumnInfo::primaryKeyColumn)
+        .containsExactly(true, true, false, false);
+    // The whole primary key is projected, so the grid may edit these rows.
+    assertThat(service.resultSetInfo(result.resultHandle()).editable()).isTrue();
+  }
+
+  @Test
+  void aResultSetMissingAKeyColumnIsNotEditable() {
+    CqlSession session =
+        FakeSchema.table("demo", "users")
+            .partitionKey("user_id", DataTypes.UUID)
+            .clustering("created_at", DataTypes.TIMESTAMP)
+            .regular("email", DataTypes.TEXT)
+            .session();
+    DriverContext context = mock(DriverContext.class);
+    lenient().when(context.getProtocolVersion()).thenReturn(ProtocolVersion.V5);
+    lenient().when(session.getContext()).thenReturn(context);
+    stubExecute(session, page(List.of(), null, null, false, "user_id", "email"));
+
+    ResultPage result = service.execute(session, QuerySpec.of("SELECT user_id, email FROM demo.users"));
+
+    assertThat(service.resultSetInfo(result.resultHandle()).editable()).isFalse();
+  }
+
+  @Test
+  void similarityProjectionsAreFlaggedForScoreRendering() {
+    CqlSession session = session();
+    stubExecute(session, page(List.of(), null, null, false, "id", "similarity_cosine"));
+
+    ResultPage result = service.execute(session, QuerySpec.of("SELECT id, similarity_cosine(...) FROM t"));
+
+    assertThat(result.similarityColumns()).containsExactly("similarity_cosine");
+  }
+
   /* ------------------------------------------------------------------------------ helpers */
 
   private static CqlSession session() {

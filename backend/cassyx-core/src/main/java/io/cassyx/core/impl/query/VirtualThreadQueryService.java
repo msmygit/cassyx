@@ -137,13 +137,16 @@ public final class VirtualThreadQueryService implements QueryService, AutoClosea
     warnings.addAll(rs.getExecutionInfo().getWarnings());
 
     List<ColumnInfo> columns = mapper.describe(session, rs.getColumnDefinitions());
+    // wasApplied() MUST be read before the page is consumed: on an AsyncResultSet it is derived
+    // from the first row, and the driver throws once that row has been handed out.
+    Boolean applied = appliedFlag(columns, rs.wasApplied());
+
     List<Map<String, Object>> rows = new ArrayList<>();
     for (Row row : rs.currentPage()) {
       rows.add(mapper.toWireRow(row, columns));
     }
 
     boolean wasVoid = columns.isEmpty();
-    Boolean applied = appliedFlag(columns, rs.wasApplied());
     ByteBuffer nextState = rs.getExecutionInfo().getPagingState();
 
     String keyspace = columns.stream().map(ColumnInfo::keyspace).filter(k -> k != null).findFirst().orElse(null);

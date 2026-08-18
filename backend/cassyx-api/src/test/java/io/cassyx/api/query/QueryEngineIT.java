@@ -58,6 +58,11 @@ class QueryEngineIT extends IntegrationTestBase {
     session.execute(
         "CREATE TABLE IF NOT EXISTS " + KEYSPACE + ".users (user_id uuid, created_at timestamp,"
             + " email text, logins bigint, PRIMARY KEY (user_id, created_at))");
+    // The batch test writes to its OWN table: sharing `paged` would add rows underneath the
+    // paging-completeness assertion and make it fail for a reason that has nothing to do with paging.
+    session.execute(
+        "CREATE TABLE IF NOT EXISTS " + KEYSPACE + ".batched (bucket int, seq int, payload text,"
+            + " PRIMARY KEY (bucket, seq))");
     session.execute("TRUNCATE " + KEYSPACE + ".paged");
 
     var insert = session.prepare("INSERT INTO " + KEYSPACE + ".paged (bucket, seq, payload) VALUES (?,?,?)");
@@ -194,7 +199,7 @@ class QueryEngineIT extends IntegrationTestBase {
 
   @Test
   void batchesReportWhetherTheySpanPartitions() {
-    String cql = "INSERT INTO " + KEYSPACE + ".paged (bucket, seq, payload) VALUES (?,?,?)";
+    String cql = "INSERT INTO " + KEYSPACE + ".batched (bucket, seq, payload) VALUES (?,?,?)";
 
     var singlePartition =
         QUERIES.executeBatch(

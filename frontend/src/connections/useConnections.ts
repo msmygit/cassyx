@@ -28,7 +28,11 @@ import {
   type ConnectionTestResult,
   type SessionState,
 } from './connectionsApi';
-import { saveConnection, type SaveConnectionOptions, type SaveConnectionResult } from './saveConnection';
+import {
+  saveConnection,
+  type SaveConnectionOptions,
+  type SaveConnectionResult,
+} from './saveConnection';
 
 export function useConnections(): UseQueryResult<ConnectionResponse[]> {
   return useQuery({ queryKey: queryKeys.connections, queryFn: () => listConnections() });

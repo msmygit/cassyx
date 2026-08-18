@@ -122,9 +122,7 @@ export function ConnectionDialog({
     setBusy('testing');
     try {
       setTestResult(
-        await testFn(
-          connectionId ? { connectionId } : { connection: toConnectionRequest(form) },
-        ),
+        await testFn(connectionId ? { connectionId } : { connection: toConnectionRequest(form) }),
       );
     } catch (error) {
       reportError(error, 'Could not reach the cassyx server.');

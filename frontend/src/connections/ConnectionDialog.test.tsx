@@ -107,12 +107,16 @@ describe('ConnectionDialog', () => {
 
   it('tests unsaved form input and renders the cluster it reached', async () => {
     const user = userEvent.setup();
-    const testFn = vi.fn(async () => ({
-      success: true,
-      elapsedMillis: 412,
-      clusterName: 'Test Cluster',
-      releaseVersion: '5.0.2',
-    }));
+    let probed: unknown;
+    const testFn = vi.fn(async (request: unknown) => {
+      probed = request;
+      return {
+        success: true,
+        elapsedMillis: 412,
+        clusterName: 'Test Cluster',
+        releaseVersion: '5.0.2',
+      };
+    });
 
     renderWithProviders(
       <ConnectionDialog open onClose={vi.fn()} saveFn={vi.fn()} testFn={testFn as never} />,
@@ -124,7 +128,8 @@ describe('ConnectionDialog', () => {
     const result = await screen.findByTestId('connection-test-result');
     expect(result).toHaveTextContent(/Test Cluster/);
     expect(result).toHaveTextContent(/5\.0\.2/);
-    expect(vi.mocked(testFn).mock.calls.at(0)?.[0]).toHaveProperty('connection');
+    // Unsaved input is sent inline; a saved connection would be tested by id instead.
+    expect(probed).toHaveProperty('connection');
   });
 
   /** A failed probe is a 200 with success:false - the diagnostic must survive to the user. */

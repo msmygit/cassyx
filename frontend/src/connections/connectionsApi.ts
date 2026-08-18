@@ -72,9 +72,7 @@ export function connectConnection(
   connectionId: string,
   client: ApiClient = apiClient,
 ): Promise<SessionState> {
-  return client.post<SessionState>(
-    `/api/connections/${encodeURIComponent(connectionId)}/connect`,
-  );
+  return client.post<SessionState>(`/api/connections/${encodeURIComponent(connectionId)}/connect`);
 }
 
 export function disconnectConnection(

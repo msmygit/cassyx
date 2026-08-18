@@ -327,4 +327,3 @@ describe('toConnectionRequest', () => {
     expect(request.contactPoints).toBeUndefined();
   });
 });
-

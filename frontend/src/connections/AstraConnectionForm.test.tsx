@@ -142,9 +142,7 @@ describe('AstraConnectionForm', () => {
   it('offers a re-download action for rotated bundles', async () => {
     const user = userEvent.setup();
     const api = mockApi();
-    renderWithProviders(
-      <Harness api={api} initial={{ astraToken: TOKEN }} connectionId="c1" />,
-    );
+    renderWithProviders(<Harness api={api} initial={{ astraToken: TOKEN }} connectionId="c1" />);
 
     await user.click(screen.getByTestId('astra-load-databases'));
     await selectOption(user, 'astra-database-select', /prod-vectors/);

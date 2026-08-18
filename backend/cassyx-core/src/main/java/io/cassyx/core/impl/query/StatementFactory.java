@@ -8,6 +8,7 @@ import com.datastax.oss.driver.api.core.cql.BatchStatement;
 import com.datastax.oss.driver.api.core.cql.BatchableStatement;
 import com.datastax.oss.driver.api.core.cql.BoundStatementBuilder;
 import com.datastax.oss.driver.api.core.cql.ColumnDefinition;
+import com.datastax.oss.driver.api.core.cql.ColumnDefinitions;
 import com.datastax.oss.driver.api.core.cql.PreparedStatement;
 import com.datastax.oss.driver.api.core.cql.SimpleStatement;
 import com.datastax.oss.driver.api.core.cql.Statement;
@@ -67,9 +68,13 @@ final class StatementFactory {
     return builder.build();
   }
 
+  /** Index-based rather than iterator-based: bind-marker POSITION is what a `?` refers to. */
   private static List<ColumnDefinition> allVariables(PreparedStatement prepared) {
-    List<ColumnDefinition> variables = new java.util.ArrayList<>();
-    prepared.getVariableDefinitions().forEach(variables::add);
+    ColumnDefinitions definitions = prepared.getVariableDefinitions();
+    List<ColumnDefinition> variables = new java.util.ArrayList<>(definitions.size());
+    for (int i = 0; i < definitions.size(); i++) {
+      variables.add(definitions.get(i));
+    }
     return variables;
   }
 

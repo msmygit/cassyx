@@ -25,19 +25,21 @@ public class ConnectionsConfiguration {
   private static final Logger LOG = LoggerFactory.getLogger(ConnectionsConfiguration.class);
 
   /**
-   * The AES-256-GCM cipher for everything stored at rest.
+   * The AES-256-GCM cipher for everything stored at rest, keyed from {@code CASSYX_SECRET_KEY}
+   * (Spring's relaxed binding also accepts {@code cassyx.secret-key}).
    *
-   * <p>Deliberately fatal when {@code CASSYX_SECRET_KEY} is unset: cassyx stores cluster passwords,
-   * Astra tokens and secure connect bundles, and a "no key configured" fallback would either write
-   * them in plaintext or lose every stored credential on restart. Failing at startup, with the
-   * command to generate a key, is the honest option.
+   * <p>With no key configured the app still boots - health, licensing and every feature that does
+   * not touch a credential keep working - but {@link UnconfiguredSecretCipher} refuses to encrypt
+   * or decrypt anything, with the command that fixes it. What it never does is fall back to
+   * plaintext storage of cluster passwords and Astra tokens.
    */
   @Bean
   public SecretCipher secretCipher(@Value("${cassyx.secret-key:}") String configured) {
     if (configured != null && !configured.isBlank()) {
       return CoreFactory.secretCipher(configured);
     }
-    return CoreFactory.secretCipher();
+    LOG.warn(UnconfiguredSecretCipher.MESSAGE);
+    return new UnconfiguredSecretCipher();
   }
 
   /**
@@ -52,7 +54,13 @@ public class ConnectionsConfiguration {
 
   /**
    * ONE registry per process. Two would mean two {@code CqlSession}s per connection and double the
-   * connection pools against every cluster.
+   * connection pools against every cluster - which is also why there is deliberately no second,
+   * read-only {@link SessionRegistry} bean: it would be the same object under two names and make
+   * every injection point ambiguous.
+   *
+   * <p>The read-only/managed split is enforced at the type level instead. A feature that declares a
+   * {@link SessionRegistry} dependency gets this bean but cannot see {@code open} or {@code close},
+   * so it cannot shut down a session another feature is mid-query on.
    */
   @Bean(destroyMethod = "close")
   public ManagedSessionRegistry sessionRegistry(
@@ -60,14 +68,5 @@ public class ConnectionsConfiguration {
       @Value("${cassyx.sessions.idle-timeout-seconds:1800}") long idleTimeoutSeconds) {
     LOG.info("Session idle-eviction TTL: {}s", idleTimeoutSeconds);
     return CoreFactory.sessionRegistry(sessionFactory, Duration.ofSeconds(idleTimeoutSeconds));
-  }
-
-  /**
-   * The read-only view every other workstream injects. Exposed as a separate bean so a feature
-   * cannot accidentally take the managed interface and close a session somebody else is querying.
-   */
-  @Bean
-  public SessionRegistry readOnlySessionRegistry(ManagedSessionRegistry registry) {
-    return registry;
   }
 }
