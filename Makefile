@@ -47,7 +47,7 @@ DIM  := \033[2m
 OFF  := \033[0m
 say   = @printf "$(CYAN)▸$(OFF) $(BOLD)%s$(OFF)\n" "$(1)"
 
-.PHONY: help up down dev test e2e e2e-ui bench verify seed smoke \
+.PHONY: help up down dev test e2e e2e-ui bench verify seed smoke lint-workflows \
         db cql logs ps config show-contracts clean nuke restart open \
         contract lint arch unit integration security mutation compat \
         lint-backend lint-frontend unit-backend unit-frontend \
@@ -157,7 +157,16 @@ contract: ## API contract gate — redocly lint (0 errors/0 warnings) · $$refs 
 	$(call say,API contract gate — openapi/cassyx-api.yaml (§2.3))
 	@bash $(ROOT)/scripts/check-openapi.sh
 
-lint: lint-backend lint-frontend ## spotless/checkstyle · eslint · tsc --noEmit
+lint: lint-workflows lint-backend lint-frontend ## actionlint · spotless/checkstyle · eslint · tsc --noEmit
+
+lint-workflows: ## Validate GitHub Actions workflows (actionlint)
+	$(call say,actionlint — GitHub Actions workflow validation)
+	@# An invalid workflow file does not fail loudly: every job dies at startup in 0s with
+	@# only "This run likely failed because of a workflow file issue", so CI silently stops
+	@# running while looking like it ran. That is exactly how a `secrets` context in a
+	@# step-level `if:` shipped to main unnoticed. actionlint names the line and the reason.
+	@docker run --rm -v "$(ROOT):/repo" -w /repo rhysd/actionlint:latest || \
+	  (printf "\033[31m✗ workflow validation failed — CI will not run at all until this is fixed.\033[0m\n"; exit 1)
 
 lint-backend: check-backend-src
 	$(call say,spotless:check + checkstyle)
