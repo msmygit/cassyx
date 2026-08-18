@@ -18,6 +18,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.TreeSet;
+import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -90,8 +91,7 @@ public final class DefaultCapabilityProbe implements CapabilityProbe {
     String clusterName = text(local, "cluster_name");
     String partitioner = partitioner(session, local);
 
-    ClusterFlavor flavor =
-        detectFlavor(session, hint, partitioner, dseVersion, clusterName);
+    ClusterFlavor flavor = detectFlavor(session, hint, partitioner, dseVersion, clusterName);
 
     Map<Capability, CapabilityStatus> matrix =
         CapabilityMatrix.forCluster(flavor, releaseVersion, dseVersion);
@@ -99,7 +99,7 @@ public final class DefaultCapabilityProbe implements CapabilityProbe {
     List<String> datacenters = new ArrayList<>();
     int nodeCount = 0;
     try {
-      Map<java.util.UUID, Node> nodes = session.getMetadata().getNodes();
+      Map<UUID, Node> nodes = session.getMetadata().getNodes();
       nodeCount = nodes.size();
       TreeSet<String> sorted = new TreeSet<>();
       for (Node node : nodes.values()) {

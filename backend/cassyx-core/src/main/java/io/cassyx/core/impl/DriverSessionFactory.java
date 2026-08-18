@@ -17,8 +17,10 @@ import java.nio.file.Path;
 import java.security.GeneralSecurityException;
 import java.security.KeyStore;
 import java.util.function.Function;
+import javax.net.ssl.KeyManager;
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManager;
 import javax.net.ssl.TrustManagerFactory;
 
 /**
@@ -172,7 +174,7 @@ public final class DriverSessionFactory implements SessionFactory {
     }
   }
 
-  private static javax.net.ssl.KeyManager[] keyManagers(SslSpec ssl)
+  private static KeyManager[] keyManagers(SslSpec ssl)
       throws GeneralSecurityException, IOException {
     if (!ssl.hasKeystore()) {
       return null;
@@ -185,7 +187,7 @@ public final class DriverSessionFactory implements SessionFactory {
     return factory.getKeyManagers();
   }
 
-  private static javax.net.ssl.TrustManager[] trustManagers(SslSpec ssl)
+  private static TrustManager[] trustManagers(SslSpec ssl)
       throws GeneralSecurityException, IOException {
     if (!ssl.hasTruststore()) {
       return null;
