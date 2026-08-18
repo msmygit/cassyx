@@ -23,6 +23,8 @@ export type Schemas = components['schemas'];
 export type LicenseStatus = Schemas['LicenseStatus'];
 export type LicenseEdition = LicenseStatus['edition'];
 export type ActivateLicenseRequest = Schemas['LicenseActivationRequest'];
+/** `POST /api/license/trial` (plan §9.4) — email + optional name, no card, no Stripe involvement. */
+export type TrialRequest = Schemas['TrialRequest'];
 export type CheckoutSessionResponse = Schemas['CheckoutSessionResponse'];
 export type ServiceHealth = Schemas['ServiceHealth'];
 

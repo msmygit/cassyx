@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { screen, within } from '@testing-library/react';
+import { cleanup, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, useRoutes } from 'react-router';
 import { renderWithProviders } from '../test/render';
@@ -80,6 +80,23 @@ describe('AppShell', () => {
     renderShell();
     expect(screen.queryByTestId('license-bypass-banner')).not.toBeInTheDocument();
     expect(screen.getByTestId('status-edition')).toHaveTextContent('standard');
+  });
+
+  it('shows a trial countdown for a valid trial license, and none for a perpetual one', () => {
+    renderShell({
+      licensed: true,
+      enforce: true,
+      bypass: false,
+      edition: 'trial',
+      state: 'VALID',
+      trial: true,
+      daysRemaining: 2,
+    });
+    expect(screen.getByTestId('trial-countdown')).toHaveTextContent(/2 days left/i);
+
+    cleanup();
+    renderShell();
+    expect(screen.queryByTestId('trial-countdown')).not.toBeInTheDocument();
   });
 
   it('opens a table from the schema tree into a new tab, titled by its qualified name', async () => {
