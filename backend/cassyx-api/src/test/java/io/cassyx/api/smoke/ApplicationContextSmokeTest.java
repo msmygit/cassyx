@@ -2,12 +2,16 @@ package io.cassyx.api.smoke;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import io.cassyx.api.bulk.DsbulkJobService;
 import io.cassyx.api.config.BillingProperties;
 import io.cassyx.api.config.LicenseProperties;
+import io.cassyx.api.schema.SchemaSessions;
 import io.cassyx.bulk.api.Encoder;
 import io.cassyx.core.api.CqlStatementSplitter;
+import io.cassyx.core.api.ManagedSessionRegistry;
 import io.cassyx.core.api.SchemaCatalog;
 import io.cassyx.core.api.SessionFactory;
+import io.cassyx.core.api.SessionRegistry;
 import io.cassyx.core.api.astra.ScbPathResolver;
 import io.cassyx.license.api.LicenseVerifier;
 import io.cassyx.license.api.PaymentProvider;
@@ -18,6 +22,7 @@ import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.context.ApplicationContext;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.TestPropertySource;
 
@@ -45,6 +50,9 @@ class ApplicationContextSmokeTest {
   @Autowired private BillingProperties billingProperties;
   @Autowired private List<Encoder> encoders;
   @Autowired private List<ImportSource> importSources;
+  @Autowired private ApplicationContext context;
+  @Autowired private SchemaSessions schemaSessions;
+  @Autowired private DsbulkJobService dsbulkJobService;
 
   @Test
   void wiresEveryModuleThroughItsApiPackage() {
@@ -56,6 +64,26 @@ class ApplicationContextSmokeTest {
     assertThat(licenseVerifier).isNotNull();
     assertThat(encoders).extracting(Encoder::format).contains("csv");
     assertThat(importSources).extracting(ImportSource::id).contains("csv");
+  }
+
+  /**
+   * Exactly ONE {@code SessionRegistry} bean, and it is the real one.
+   *
+   * <p>Asserted rather than assumed because both failure modes have already happened here. Two beans
+   * made every {@code SessionRegistry} injection point ambiguous and broke three workstreams' Spring
+   * contexts at once. One bean that happened to be a no-op fallback was worse: nothing failed, and
+   * the query, schema and DSBulk features quietly reported "not connected" and derived their
+   * defaults from {@code UNKNOWN} against a cluster that was, in fact, connected.
+   */
+  @Test
+  void exactlyOneSessionRegistryBeanIsPublished() {
+    assertThat(context.getBeanNamesForType(SessionRegistry.class)).hasSize(1);
+    assertThat(context.getBean(SessionRegistry.class)).isInstanceOf(ManagedSessionRegistry.class);
+    assertThat(context.getBeanNamesForType(ManagedSessionRegistry.class)).hasSize(1);
+    // The features that used to take it optionally now take it outright, so the context itself is
+    // the proof that they got the real registry.
+    assertThat(schemaSessions).isNotNull();
+    assertThat(dsbulkJobService).isNotNull();
   }
 
   @Test

@@ -32,7 +32,6 @@ import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicLong;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 
 /**
@@ -62,7 +61,7 @@ public class DsbulkJobService {
   private final DsbulkJobEventStream events;
   private final DsbulkRunner runner;
   private final ExecutorService executor;
-  private final ObjectProvider<SessionRegistry> sessions;
+  private final SessionRegistry sessions;
   private final ObjectMapper json;
   private final Path workRoot;
   private final Clock clock;
@@ -70,12 +69,23 @@ public class DsbulkJobService {
   private final Map<String, Future<?>> inFlight = new ConcurrentHashMap<>();
   private final Map<String, Path> jobDirectories = new ConcurrentHashMap<>();
 
+  /**
+   * Jobs the user cancelled, so the worker thread can tell a kill from a crash.
+   *
+   * <p>Needed because the two race. {@link #cancel} signals the child and writes CANCELLED; the
+   * worker is still blocked in {@code runner.run()} and wakes up moments later holding exit status
+   * 143 (128 + SIGTERM), which is indistinguishable from a crash by exit code alone. Without this
+   * set the worker's own terminal write lands second and overwrites CANCELLED with FAILED - the job
+   * really was cancelled, and the UI would say it failed.
+   */
+  private final java.util.Set<String> cancelled = ConcurrentHashMap.newKeySet();
+
   public DsbulkJobService(
       DsbulkJobRepository repository,
       DsbulkJobEventStream events,
       DsbulkRunner runner,
       ExecutorService dsbulkJobExecutor,
-      ObjectProvider<SessionRegistry> sessions,
+      SessionRegistry sessions,
       ObjectMapper json,
       Path dsbulkJobWorkRoot,
       Clock clock) {
@@ -89,14 +99,20 @@ public class DsbulkJobService {
     this.clock = clock;
   }
 
-  /** Probes the cluster for a connection, degrading to {@link DsbulkProbe#UNKNOWN} if it cannot. */
+  /**
+   * Probes the cluster for a connection, degrading to {@link DsbulkProbe#UNKNOWN} if it cannot.
+   *
+   * <p>The registry is injected directly. It used to arrive through an {@code ObjectProvider}
+   * because workstream A had not yet registered a bean, which meant every derived default was
+   * computed from {@code UNKNOWN} - generic split counts and concurrency for every cluster, however
+   * big. There is one registry bean now, so the defaults are derived from real capability data.
+   */
   public DsbulkProbe probe(String connectionId, String keyspace, String table) {
-    SessionRegistry registry = sessions.getIfAvailable();
-    if (registry == null || connectionId == null || !registry.isConnected(connectionId)) {
+    if (connectionId == null || !sessions.isConnected(connectionId)) {
       return DsbulkProbe.UNKNOWN;
     }
     try {
-      CqlSession session = registry.session(connectionId);
+      CqlSession session = sessions.session(connectionId);
       return DsbulkFactory.probe(session, keyspace, table);
     } catch (RuntimeException e) {
       // A probe failure must degrade the QUALITY of the derived defaults, never block the job.
@@ -157,6 +173,12 @@ public class DsbulkJobService {
 
       finish(jobId, type, connectionId, name, spec, plan, result, startedAt);
     } catch (IOException | RuntimeException e) {
+      if (cancelled.remove(jobId)) {
+        // The child was killed out from under the runner. cancel() already wrote the terminal row
+        // and published the events; reporting this as a failure on top would contradict it.
+        LOG.info("DSBulk job {} ended because it was cancelled", jobId);
+        return;
+      }
       LOG.warn("DSBulk job {} failed", jobId, e);
       Instant finishedAt = clock.instant();
       repository.markFinished(jobId, "FAILED", finishedAt, 0, safeMessage(e), null);
@@ -180,6 +202,11 @@ public class DsbulkJobService {
       DsbulkPlan plan,
       DsbulkResult result,
       Instant startedAt) {
+    if (cancelled.remove(jobId)) {
+      // cancel() owns the terminal transition for a cancelled job - see the `cancelled` field.
+      LOG.info("DSBulk job {} finished after cancellation (exit {})", jobId, result.exitCode());
+      return;
+    }
     Instant finishedAt = clock.instant();
     long durationMillis = finishedAt.toEpochMilli() - startedAt.toEpochMilli();
     String status = status(result);
@@ -215,11 +242,25 @@ public class DsbulkJobService {
     return result.succeeded() ? "SUCCEEDED" : "FAILED";
   }
 
-  /** Cancels a running job by killing its child process. */
+  /**
+   * Cancels a running job by killing its child process.
+   *
+   * <p>This is what {@code POST /api/jobs/{id}/cancel} reaches for a row with {@code
+   * engine='DSBULK'}, via {@link JobService#requestCancel}. It is the only thing in the system that
+   * can stop a DSBulk job: the native engine's cooperative {@code AtomicBoolean} is not wired to
+   * anything DSBulk reads, so without this delegation the endpoint would answer 202 while the job
+   * kept consuming the user's cluster.
+   *
+   * @return {@code true} when this service owns the job and has signalled or dequeued it
+   */
   public boolean cancel(String jobId) {
     Path directory = jobDirectories.get(jobId);
-    boolean killed = directory != null && runner.cancel(directory);
     Future<?> future = inFlight.get(jobId);
+    if (directory == null && future == null) {
+      return false;
+    }
+    cancelled.add(jobId);
+    boolean killed = directory != null && runner.cancel(directory);
     if (!killed && future != null) {
       future.cancel(true);
     }

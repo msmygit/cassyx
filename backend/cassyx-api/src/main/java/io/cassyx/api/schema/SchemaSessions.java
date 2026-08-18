@@ -6,23 +6,22 @@ import io.cassyx.core.api.CassyxCoreException;
 import io.cassyx.core.api.ClusterCapabilities;
 import io.cassyx.core.api.SessionRegistry;
 import io.cassyx.core.api.schema.UnsupportedCapabilityException;
-import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Component;
 
 /**
  * Resolves a live session and its capabilities for a connection id.
  *
- * <p>Held through an {@link ObjectProvider} on purpose. {@link SessionRegistry} is workstream A's
- * seam; taking it optionally means the schema endpoints compile, start and answer "not connected"
- * legibly whether or not the registry bean is present yet, instead of failing context startup for
- * every other workstream.
+ * <p>Injected directly. This was an {@code ObjectProvider} while workstream A's registry was still
+ * in flight; there is now exactly one {@code SessionRegistry} bean, so the optional lookup could
+ * only ever return it. Keeping the fallback would mean a wiring mistake degraded silently into
+ * "not connected" for every schema call instead of failing at start-up where it is diagnosable.
  */
 @Component
 public class SchemaSessions {
 
-  private final ObjectProvider<SessionRegistry> registry;
+  private final SessionRegistry registry;
 
-  public SchemaSessions(ObjectProvider<SessionRegistry> registry) {
+  public SchemaSessions(SessionRegistry registry) {
     this.registry = registry;
   }
 
@@ -68,14 +67,10 @@ public class SchemaSessions {
   }
 
   private SessionRegistry require(String connectionId) {
-    SessionRegistry sessions = registry.getIfAvailable();
-    if (sessions == null) {
+    if (!registry.isConnected(connectionId)) {
       throw new NotConnectedException(connectionId, null);
     }
-    if (!sessions.isConnected(connectionId)) {
-      throw new NotConnectedException(connectionId, null);
-    }
-    return sessions;
+    return registry;
   }
 
   /** No live session for this connection - the contract's {@code NotConnected} 409. */

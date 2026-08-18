@@ -1,8 +1,5 @@
 package io.cassyx.api.query;
 
-import io.cassyx.core.api.ClusterCapabilities;
-import io.cassyx.core.api.ConnectionNotOpenException;
-import io.cassyx.core.api.SessionRegistry;
 import io.cassyx.core.api.query.CqlLexer;
 import io.cassyx.core.api.query.CqlScriptSplitter;
 import io.cassyx.core.api.query.CqlValueCodec;
@@ -13,7 +10,6 @@ import java.time.Duration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.scheduling.annotation.EnableScheduling;
@@ -68,34 +64,14 @@ public class QueryModuleConfiguration {
     return new ResultSetSweeper(queries);
   }
 
-  /**
-   * Fallback so the query and data endpoints are wired even before workstream A's real registry
-   * lands. It fails every lookup with the contract's {@code 409 NotConnected}, which is the honest
-   * answer for a deployment with no session management: {@code @ConditionalOnMissingBean} means the
-   * real implementation always wins.
-   */
-  @Bean
-  @ConditionalOnMissingBean(SessionRegistry.class)
-  public SessionRegistry unavailableSessionRegistry() {
-    LOG.warn("No SessionRegistry bean found; query and data endpoints will report 409 Not connected");
-    return new SessionRegistry() {
-
-      @Override
-      public com.datastax.oss.driver.api.core.CqlSession session(String connectionId) {
-        throw new ConnectionNotOpenException(connectionId);
-      }
-
-      @Override
-      public boolean isConnected(String connectionId) {
-        return false;
-      }
-
-      @Override
-      public ClusterCapabilities capabilities(String connectionId) {
-        throw new ConnectionNotOpenException(connectionId);
-      }
-    };
-  }
+  // There was a @ConditionalOnMissingBean SessionRegistry fallback here that failed every lookup
+  // with 409 NotConnected. It existed only because workstream A had not yet registered a real
+  // registry. It is gone now that ConnectionsConfiguration publishes exactly one
+  // ManagedSessionRegistry (which IS a SessionRegistry), and its removal is not cosmetic: with the
+  // fallback in place a bean-ordering accident could have silently wired the query and data
+  // endpoints to a registry that reports "not connected" for a cluster that is, in fact, connected.
+  // Do NOT add a second SessionRegistry bean - two make every injection point ambiguous and broke
+  // three workstreams' Spring contexts the last time it happened.
 
   /** Scheduled sweep of expired result handles. */
   public static final class ResultSetSweeper {

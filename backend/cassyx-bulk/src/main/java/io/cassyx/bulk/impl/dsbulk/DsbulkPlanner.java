@@ -74,16 +74,23 @@ public final class DsbulkPlanner {
     String confFile = jobDirectory == null
         ? DsbulkCommandBuilder.CONF_FILE_NAME
         : jobDirectory.resolve(DsbulkCommandBuilder.CONF_FILE_NAME).toString();
-    List<String> argv = DsbulkCommandBuilder.argv(spec.operation(), masked, confFile);
+    // What DSBulk is actually given: s3.* region/profile/credentials folded into the s3:// URL as
+    // query parameters, because they are not settings in 1.11. `masked` keeps them as fields so the
+    // UI can still render and edit them.
+    List<DsbulkSetting> rendered = DsbulkS3Url.fold(masked);
+    List<String> argv = DsbulkCommandBuilder.argv(spec.operation(), rendered, confFile);
+
+    List<String> warnings = new ArrayList<>(warnings(spec, facts));
+    warnings.addAll(DsbulkS3Url.warnings(masked));
 
     return new DsbulkPlan(
         spec.operation(),
         List.copyOf(masked),
         argv,
         DsbulkCommandBuilder.command(argv),
-        DsbulkHocon.render(masked, Map.of()),
+        DsbulkHocon.render(rendered, Map.of()),
         List.copyOf(maskedFields),
-        warnings(spec, facts));
+        List.copyOf(warnings));
   }
 
   /**
@@ -96,7 +103,27 @@ public final class DsbulkPlanner {
     if (secrets != null) {
       secrets.forEach((key, value) -> normalised.put(DsbulkReference.normalise(key), value));
     }
-    return DsbulkHocon.render(plan.settings(), normalised);
+    // Secrets are substituted FIRST, then folded into the s3:// URL. The other order would fold the
+    // mask into the URL and then have nothing left to substitute it into: the s3 credentials are not
+    // settings DSBulk reads (see DsbulkS3Url), so there is no `dsbulk.s3.secretAccessKey` line for a
+    // later pass to fix up. The job would authenticate as `***`.
+    return DsbulkHocon.render(DsbulkS3Url.fold(substitute(plan.settings(), normalised)), Map.of());
+  }
+
+  /** The settings with masked values replaced by their real ones, keyed by setting path. */
+  private static List<DsbulkSetting> substitute(
+      List<DsbulkSetting> settings, Map<String, String> secrets) {
+    if (secrets.isEmpty()) {
+      return settings;
+    }
+    List<DsbulkSetting> out = new ArrayList<>(settings.size());
+    for (DsbulkSetting setting : settings) {
+      String real = secrets.get(DsbulkReference.normalise(setting.path()));
+      out.add(real == null ? setting
+          : new DsbulkSetting(setting.path(), real, setting.auto(), setting.upstreamDefault(),
+              setting.rationale(), setting.docsUrl(), setting.group()));
+    }
+    return out;
   }
 
   /** Honest, actionable warnings, surfaced next to the preview rather than discovered at run time. */

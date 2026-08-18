@@ -288,6 +288,7 @@ class JobApiLayerTest {
         new DsbulkJobEventStream(),
         null,
         null,
+        null,
         MAPPER,
         Path.of("/tmp"),
         java.time.Clock.systemUTC(),
