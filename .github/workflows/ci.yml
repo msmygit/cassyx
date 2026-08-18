@@ -1,0 +1,189 @@
+# =============================================================================
+# cassyx CI — the per-PR job set from plan §11.1.
+#
+#   contract · lint · arch · unit · integration · e2e · security
+#
+# `contract` runs FIRST and FAST (§11.1): it is the cheapest signal that eight
+# parallel workstreams are still building against the same agreed API. It has no
+# `needs:` either — it simply finishes in a minute or two while the heavy jobs
+# are still pulling images.
+#
+# Every job runs the SAME `make` target a developer runs locally. That is the
+# no-drift rule: `make verify` runs exactly this set, so there is no
+# "works on my machine" gap. If you change what CI does, change the Makefile
+# target — never the workflow step.
+#
+# All jobs are independent (no `needs:`) so they run fully in parallel.
+# Branch protection should require: contract, lint, arch, unit, integration,
+# e2e, security.
+# =============================================================================
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # CI never opens a browser and always runs with licensing bypassed (§9.2).
+  CASSYX_NO_OPEN: "1"
+  CASSYX_LICENSE_ENFORCE: "false"
+  DOCKER_BUILDKIT: "1"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # First and fastest (§11.1): openapi/cassyx-api.yaml is the coordination
+  # artifact — a red spec breaks every workstream at once.
+  contract:
+    name: contract (openapi 3.1.1 · refs · redocly 0/0 · gen:api)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - run: cp .env.example .env
+      - name: make contract
+        run: make contract
+
+  # ---------------------------------------------------------------------------
+  lint:
+    name: lint (spotless · checkstyle · eslint · tsc)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bootstrap .env
+        run: cp .env.example .env
+      - name: make lint
+        run: make lint
+
+  # ---------------------------------------------------------------------------
+  arch:
+    name: arch (ArchUnit §2.1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - run: cp .env.example .env
+      - name: make arch
+        run: make arch
+
+  # ---------------------------------------------------------------------------
+  unit:
+    name: unit (mvn test · vitest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        java: ["21"]
+    steps:
+      - uses: actions/checkout@v4
+      - run: cp .env.example .env
+      - name: make unit
+        run: make unit
+      - name: make unit-frontend
+        run: make unit-frontend
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-unit
+          path: |
+            backend/**/target/site/jacoco/**
+            frontend/coverage/**
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  integration:
+    name: integration (Testcontainers Cassandra 5.x)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - run: cp .env.example .env
+      - name: Pre-pull Cassandra 5.x
+        run: docker pull cassandra:5.0
+      - name: make integration
+        run: make integration
+      - name: Upload surefire/failsafe reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-reports
+          path: backend/**/target/*-reports/**
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  e2e:
+    name: e2e (Playwright)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - run: cp .env.example .env
+      - name: Pre-pull Cassandra 5.x
+        run: docker pull cassandra:5.0
+      - name: make e2e
+        run: make e2e
+      - name: Stack logs on failure
+        if: failure()
+        run: make logs || docker compose logs --tail=200 || true
+      - name: Upload Playwright report (trace + video retained on failure)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            e2e/playwright-report/**
+            e2e/test-results/**
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Tear down
+        if: always()
+        run: make down || true
+
+  # ---------------------------------------------------------------------------
+  security:
+    name: security (OWASP DC · gitleaks · npm audit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # gitleaks history scan
+      - run: cp .env.example .env
+      - name: make security
+        run: make security
+        env:
+          # Optional, but raises the OWASP DC NVD API rate limit substantially.
+          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+      - name: Upload dependency-check report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-check-report
+          path: backend/**/target/dependency-check-report.*
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # Guard against the one failure mode this pipeline exists to prevent:
+  # CI and `make verify` drifting apart.
+  verify-parity:
+    name: verify parity (CI == make verify)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: The verify target must invoke exactly the per-PR CI job set
+        run: bash scripts/check-verify-parity.sh

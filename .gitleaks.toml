@@ -1,0 +1,44 @@
+# =============================================================================
+# gitleaks configuration for `make security` / the CI security job (§11.1).
+#
+# The rule set is the full upstream default — nothing is disabled. The allowlist
+# below is deliberately narrow:
+#
+#   * committed PLACEHOLDER values. .env.example and the OpenAPI examples are
+#     required by §9.3 to carry placeholders and nothing else, so every hit in
+#     them literally contains the string "PLACEHOLDER". A real leaked key never
+#     will, so this cannot mask an actual secret.
+#   * build output and vendored dependencies, which are not our source.
+#
+# Do NOT widen this to whole files or to `.env` patterns generally: `.env` is
+# gitignored precisely so real secrets stay out of the repo.
+# =============================================================================
+title = "cassyx"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Committed placeholders and non-source paths"
+
+regexes = [
+  # Every committed example secret carries this marker (§9.3).
+  '''(?i)placeholder''',
+  # base64("dev-only-PLACEHOLDER-key-32bytes") — the dev AES key in .env.example.
+  # Spelled out rather than pattern-matched so it stays auditable.
+  '''ZGV2LW9ubHktUExBQ0VIT0xERVIta2V5LTMyYnl0ZXM=''',
+]
+
+paths = [
+  # .env is gitignored, so it cannot leak through the repo; scanning it only
+  # produces false positives from developers' real local credentials.
+  '''(^|/)\.env$''',
+  '''(^|/)node_modules(/|$)''',
+  '''(^|/)target(/|$)''',
+  '''(^|/)dist(/|$)''',
+  '''(^|/)coverage(/|$)''',
+  '''(^|/)test-results(/|$)''',
+  '''(^|/)playwright-report(/|$)''',
+  '''(^|/)\.git(/|$)''',
+  '''package-lock\.json$''',
+]

@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>io.cassyx</groupId>
+    <artifactId>cassyx-parent</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+  </parent>
+  <artifactId>cassyx-bulk</artifactId>
+  <name>cassyx-bulk</name>
+  <description>Token-range parallel unload/load, Encoder and Sink SPIs, DSBulk process runner. Plain Java, no Spring.</description>
+
+  <properties>
+    <checkstyle.config.path>${project.parent.basedir}/config/checkstyle.xml</checkstyle.config.path>
+    <!-- section 11.1 gate: 85% + completeness property tests. -->
+    <cassyx.coverage.line>0.85</cassyx.coverage.line>
+  </properties>
+
+  <dependencies>
+    <dependency>
+      <groupId>io.cassyx</groupId>
+      <artifactId>cassyx-core</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-api</artifactId>
+    </dependency>
+    <!-- NOTE (plan section 5.3): com.datastax.oss:dsbulk-runner is deliberately NOT declared here.
+         DSBulk's application.conf collides with Spring/Typesafe Config on a shared classpath, so
+         the runner is executed OUT OF PROCESS from the distribution shipped in the Docker image
+         (which also buys job isolation, cancellation and immunity to DSBulk's System.exit()).
+         The 1.11.1 pin and the CVE-2026-24400 / CVE-2023-6378 overrides live in the parent
+         <dependencyManagement> so they apply the moment anyone does add it. -->
+  </dependencies>
+
+  <profiles>
+    <profile>
+      <id>mutation</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.pitest</groupId>
+            <artifactId>pitest-maven</artifactId>
+            <executions>
+              <execution>
+                <id>pitest-mutation-coverage</id>
+                <phase>verify</phase>
+                <goals>
+                  <goal>mutationCoverage</goal>
+                </goals>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
+</project>

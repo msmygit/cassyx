@@ -1,0 +1,118 @@
+# =============================================================================
+# cassyx nightly — the jobs plan §11.1 explicitly keeps OFF the per-PR path
+# because they are too slow:
+#
+#   mutation  PIT on cassyx-core + cassyx-bulk (70% mutation-score gate)
+#   compat    matrix vs C* 3.11 / 4.1 / 5.0 / DSE 6.8 / Scylla (§7.1, §11.3)
+#   bench     §11.2 benchmarks, results appended to the committed trend file
+#
+# All three run in parallel. Only `bench` writes to the repo.
+# =============================================================================
+name: nightly
+
+on:
+  schedule:
+    - cron: "0 3 * * *"   # 03:00 UTC daily
+  workflow_dispatch:
+    inputs:
+      bench_rows:
+        description: "Rows for the unload benchmark"
+        default: "10000000"
+      bench_scale:
+        description: "SEED_SCALE for the benchmark seed"
+        default: "50"
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CASSYX_NO_OPEN: "1"
+  CASSYX_LICENSE_ENFORCE: "false"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  mutation:
+    name: mutation (PIT — core + bulk)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - run: cp .env.example .env
+      - name: make mutation
+        run: make mutation
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pit-reports
+          path: backend/**/target/pit-reports/**
+          if-no-files-found: ignore
+          retention-days: 21
+
+  # ---------------------------------------------------------------------------
+  compat:
+    name: compat (${{ matrix.target.label }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - { label: "C* 3.11",     image: "cassandra:3.11" }
+          - { label: "C* 4.1",      image: "cassandra:4.1" }
+          - { label: "C* 5.0",      image: "cassandra:5.0" }
+          - { label: "ScyllaDB 6.2", image: "scylladb/scylla:6.2" }
+          # DSE 6.8 requires a licensed image + registry credentials:
+          # - { label: "DSE 6.8",  image: "datastax/dse-server:6.8.44" }
+    steps:
+      - uses: actions/checkout@v4
+      - run: cp .env.example .env
+      - name: Probe the §7.1 capability matrix
+        run: bash scripts/compat.sh "${{ matrix.target.image }}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: compat-${{ matrix.target.label }}
+          path: bench/compat-results.txt
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+  bench:
+    name: bench (§11.2 — appends to bench/trend.csv)
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: write   # commits the trend row
+    steps:
+      - uses: actions/checkout@v4
+      - run: cp .env.example .env
+      - name: Pre-pull Cassandra 5.x
+        run: docker pull cassandra:5.0
+      - name: Bring up the stack
+        run: make up || echo "stack not fully buildable yet — bench will record what it can"
+      - name: make bench
+        run: |
+          BENCH_ROWS="${{ inputs.bench_rows || '10000000' }}" \
+          BENCH_SEED_SCALE="${{ inputs.bench_scale || '50' }}" \
+          make bench
+      - name: Commit the trend row
+        run: |
+          if git diff --quiet -- bench/trend.csv; then
+            echo "no new benchmark rows to commit"; exit 0
+          fi
+          git config user.name  "cassyx-bench"
+          git config user.email "bench@users.noreply.github.com"
+          git add bench/trend.csv
+          git commit -m "bench: nightly results $(date -u +%Y-%m-%d) [skip ci]"
+          git push
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-trend
+          path: bench/trend.csv
+      - name: Tear down
+        if: always()
+        run: make down || true

@@ -1,0 +1,78 @@
+spring:
+  application:
+    name: cassyx
+  # Java 21 virtual threads: every request and every per-token-range scan task runs on one
+  # (plan section 2 version pins, section 5.1 "async execution on virtual threads").
+  threads:
+    virtual:
+      enabled: true
+  # H2 in FILE mode - connections, saved scripts, history, jobs and the license live here and must
+  # survive a container restart. The file sits on a mounted volume in Docker Compose.
+  datasource:
+    url: jdbc:h2:file:${CASSYX_DB_PATH:./data/cassyx};AUTO_SERVER=TRUE;DB_CLOSE_ON_EXIT=FALSE
+    driver-class-name: org.h2.Driver
+    username: ${CASSYX_DB_USER:cassyx}
+    password: ${CASSYX_DB_PASSWORD:cassyx}
+    hikari:
+      pool-name: cassyx-h2
+      maximum-pool-size: 10
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+  servlet:
+    multipart:
+      # Secure connect bundle / truststore uploads (plan section 3).
+      max-file-size: 25MB
+      max-request-size: 25MB
+
+server:
+  port: ${CASSYX_PORT:8080}
+  shutdown: graceful
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+  health:
+    # cassyx manages CqlSessions per connection; there is no single global cluster to health-check.
+    cassandra:
+      enabled: false
+
+logging:
+  level:
+    io.cassyx: ${CASSYX_LOG_LEVEL:INFO}
+    com.datastax.oss.driver: WARN
+
+cassyx:
+  license:
+    enforce: ${CASSYX_LICENSE_ENFORCE:true}   # false => fully unlocked, no checks
+    key:     ${CASSYX_LICENSE_KEY:}
+    # Only the PUBLIC half of the Ed25519 key pair ever ships (plan section 9.1). Minting happens
+    # in the separate licensing/ deployment, which holds the private key.
+    public-key: ${CASSYX_LICENSE_PUBLIC_KEY:PLACEHOLDER}
+
+  billing:
+    enabled:          ${CASSYX_BILLING_ENABLED:false}
+    provider:         stripe
+    api-base-url:     ${CASSYX_BILLING_API_URL:https://api.stripe.com}
+    publishable-key:  ${STRIPE_PUBLISHABLE_KEY:pk_test_PLACEHOLDER}
+    secret-key:       ${STRIPE_SECRET_KEY:rk_test_PLACEHOLDER}
+    webhook-secret:   ${STRIPE_WEBHOOK_SECRET:whsec_PLACEHOLDER}
+    price-id:         ${STRIPE_PRICE_ID:price_PLACEHOLDER}
+    success-url:      ${CASSYX_SUCCESS_URL:http://localhost:8080/activate?session_id={CHECKOUT_SESSION_ID}}
+    cancel-url:       ${CASSYX_CANCEL_URL:http://localhost:8080/pricing}
+
+  # PATH-mode secure connect bundles resolve under this root only (plan section 3).
+  scb:
+    path-root: ${CASSYX_SCB_PATH_ROOT:/etc/cassyx/scb}
+
+  # Bounded job executor (plan section 5.5).
+  jobs:
+    max-concurrent: ${CASSYX_MAX_CONCURRENT_JOBS:4}
+    work-dir: ${CASSYX_JOB_WORK_DIR:./data/jobs}

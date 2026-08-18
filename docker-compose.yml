@@ -1,0 +1,276 @@
+# =============================================================================
+# cassyx — one-command stack (plan §2.2)
+#
+# Everything builds INSIDE containers: a clean checkout needs only Docker+Make.
+#
+# Profiles
+#   (none)  cassandra          always started — the shared database
+#   app     backend, frontend  production-shaped stack (`make up`)
+#   dev     backend-dev,
+#           frontend-dev       hot reload: Spring DevTools + Vite HMR (`make dev`)
+#   seed    seed               one-shot seeder (`make seed`)
+#   tools   maven, node        containerised toolchain (`make test`, `make lint`)
+#   e2e     e2e                Playwright runner (`make e2e`, `make e2e-ui`)
+#
+# Cassandra readiness is a REAL health check (cqlsh -e "describe keyspaces"),
+# never a sleep; every other service waits on service_healthy.
+# =============================================================================
+
+name: ${COMPOSE_PROJECT_NAME:-cassyx}
+
+x-cassandra-env: &cassandra-client-env
+  CASSANDRA_HOST: ${CASSANDRA_HOST:-cassandra}
+  CASSANDRA_PORT: "9042"
+  CASSANDRA_DC: ${CASSANDRA_DC:-datacenter1}
+  CASSANDRA_USER: ${CASSANDRA_USER:-cassandra}
+  CASSANDRA_PASSWORD: ${CASSANDRA_PASSWORD:-cassandra}
+  SEED_KEYSPACE: ${SEED_KEYSPACE:-cassyx_demo}
+
+services:
+  # ---------------------------------------------------------------------------
+  # Apache Cassandra 5.x — 5.x is REQUIRED (vector<float,N> + SAI).
+  # ---------------------------------------------------------------------------
+  cassandra:
+    image: ${CASSANDRA_IMAGE:-cassandra:5.0}
+    container_name: ${COMPOSE_PROJECT_NAME:-cassyx}-cassandra
+    ports:
+      - "${CASSANDRA_PORT:-9042}:9042"
+    environment:
+      CASSANDRA_CLUSTER_NAME: ${CASSANDRA_CLUSTER_NAME:-cassyx-dev}
+      CASSANDRA_DC: ${CASSANDRA_DC:-datacenter1}
+      CASSANDRA_RACK: ${CASSANDRA_RACK:-rack1}
+      CASSANDRA_ENDPOINT_SNITCH: GossipingPropertyFileSnitch
+      MAX_HEAP_SIZE: ${CASSANDRA_MAX_HEAP:-2G}
+      HEAP_NEWSIZE: ${CASSANDRA_HEAP_NEWSIZE:-512M}
+      # Consumed by scripts/cassandra-entrypoint.sh (dev cluster only).
+      CASSANDRA_MV_ENABLED: "true"
+    volumes:
+      - cassandra-data:/var/lib/cassandra
+      - ./scripts:/scripts:ro
+    # Cassandra 5.0 disables materialized views (and a few other features cassyx
+    # must be able to browse) in cassandra.yaml, and the stock image exposes no
+    # env var for them. The wrapper patches the config, then execs the stock
+    # entrypoint. Dev cluster only.
+    entrypoint: ["/bin/bash", "/scripts/cassandra-entrypoint.sh"]
+    command: ["cassandra", "-f"]
+    healthcheck:
+      # THE health check. Not a sleep. Fails until CQL actually answers.
+      test: ["CMD-SHELL", "cqlsh -e 'describe keyspaces' >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 40
+      start_period: 60s
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # One-shot seeder. Applies scripts/seed.cql + generated wide/skewed/vector
+  # data. Row counts scale from SEED_* env (see .env.example).
+  # ---------------------------------------------------------------------------
+  seed:
+    image: ${CASSANDRA_IMAGE:-cassandra:5.0}
+    profiles: ["seed"]
+    depends_on:
+      cassandra:
+        condition: service_healthy
+    environment:
+      <<: *cassandra-client-env
+      SEED_SCALE: ${SEED_SCALE:-1}
+      SEED_EVENTS: ${SEED_EVENTS:-2000}
+      SEED_SKEW_ROWS: ${SEED_SKEW_ROWS:-20000}
+      SEED_VECTOR_ROWS: ${SEED_VECTOR_ROWS:-200}
+      SEED_VECTOR_DIM: ${SEED_VECTOR_DIM:-1536}
+      SEED_WIDE_COLUMNS: ${SEED_WIDE_COLUMNS:-1000}
+      SEED_WIDE_ROWS: ${SEED_WIDE_ROWS:-200}
+    volumes:
+      - ./scripts:/scripts:ro
+    entrypoint: ["/bin/bash", "/scripts/seed.sh"]
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
+  # Production-shaped stack (`make up`).
+  # CONTRACT for the backend agent:  backend/Dockerfile is multi-stage
+  # (maven build stage + JRE 21 runtime), listens on 8080, exposes GET
+  # /api/health returning 200 once ready.
+  # ---------------------------------------------------------------------------
+  backend:
+    profiles: ["app"]
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ${COMPOSE_PROJECT_NAME:-cassyx}-backend
+    depends_on:
+      cassandra:
+        condition: service_healthy
+    ports:
+      - "${CASSYX_API_PORT:-8081}:8080"
+    environment:
+      <<: *cassandra-client-env
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-docker}
+      CASSYX_DATA_DIR: ${CASSYX_DATA_DIR:-/data}
+      CASSYX_SECRET_KEY: ${CASSYX_SECRET_KEY:?set CASSYX_SECRET_KEY in .env}
+      CASSYX_LICENSE_ENFORCE: ${CASSYX_LICENSE_ENFORCE:-false}
+      CASSYX_LICENSE_KEY: ${CASSYX_LICENSE_KEY:-}
+      CASSYX_BILLING_ENABLED: ${CASSYX_BILLING_ENABLED:-false}
+      CASSYX_BILLING_API_URL: ${CASSYX_BILLING_API_URL:-https://api.stripe.com}
+      STRIPE_PUBLISHABLE_KEY: ${STRIPE_PUBLISHABLE_KEY:-pk_test_PLACEHOLDER}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-rk_test_PLACEHOLDER}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-whsec_PLACEHOLDER}
+      STRIPE_PRICE_ID: ${STRIPE_PRICE_ID:-price_PLACEHOLDER}
+      CASSYX_SUCCESS_URL: ${CASSYX_SUCCESS_URL:-http://localhost:8080/activate?session_id={CHECKOUT_SESSION_ID}}
+      CASSYX_CANCEL_URL: ${CASSYX_CANCEL_URL:-http://localhost:8080/pricing}
+      JAVA_TOOL_OPTIONS: ${JAVA_TOOL_OPTIONS:--XX:MaxRAMPercentage=75}
+    networks:
+      default:
+        aliases:
+          # frontend/nginx.conf proxies to the upstream `cassyx-api`; the alias
+          # keeps that file owned by the frontend workstream and unaware of our
+          # compose service naming.
+          - cassyx-api
+    volumes:
+      - backend-data:/data
+      # Export sinks / job artifacts land here so bulk data never round-trips
+      # through the browser (§2).
+      - ./.cassyx-out:/out
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/api/health >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+    restart: unless-stopped
+
+  # CONTRACT for the frontend agent: frontend/Dockerfile is multi-stage
+  # (node build -> nginx) serving the SPA on :8080, exposing /healthz, and
+  # proxying /api (buffering OFF for SSE) to the upstream `cassyx-api`, which is
+  # a network alias of the backend service below.
+  frontend:
+    profiles: ["app"]
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: ${COMPOSE_PROJECT_NAME:-cassyx}-frontend
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${CASSYX_WEB_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Hot-reload stack (`make dev`) — same Cassandra, no image rebuild.
+  # ---------------------------------------------------------------------------
+  backend-dev:
+    profiles: ["dev"]
+    image: ${MAVEN_IMAGE:-maven:3.9-eclipse-temurin-21}
+    container_name: ${COMPOSE_PROJECT_NAME:-cassyx}-backend-dev
+    working_dir: /workspace
+    depends_on:
+      cassandra:
+        condition: service_healthy
+    ports:
+      - "${CASSYX_API_PORT:-8081}:8080"
+      # Spring DevTools remote/live-reload
+      - "35729:35729"
+    environment:
+      <<: *cassandra-client-env
+      SPRING_PROFILES_ACTIVE: dev
+      CASSYX_DATA_DIR: /data
+      CASSYX_SECRET_KEY: ${CASSYX_SECRET_KEY:?set CASSYX_SECRET_KEY in .env}
+      CASSYX_LICENSE_ENFORCE: "false"
+      MAVEN_CONFIG: /root/.m2
+    volumes:
+      - ./backend:/workspace
+      - maven-repo:/root/.m2
+      - backend-data:/data
+    command: >
+      mvn -q -pl cassyx-api -am spring-boot:run
+      -Dspring-boot.run.profiles=dev
+      -Dspring-boot.run.fork=false
+    restart: unless-stopped
+
+  frontend-dev:
+    profiles: ["dev"]
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: dev            # the Vite HMR stage of the frontend image
+    container_name: ${COMPOSE_PROJECT_NAME:-cassyx}-frontend-dev
+    ports:
+      - "${CASSYX_VITE_PORT:-5173}:5173"
+    environment:
+      # frontend/vite.config.ts reads this for its /api dev proxy.
+      CASSYX_API_PROXY: http://backend-dev:8080
+      CASSYX_POLL_WATCH: "true"
+    volumes:
+      # Live source; node_modules stays the image's copy.
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+      - ./frontend/index.html:/app/index.html
+      - ./frontend/vite.config.ts:/app/vite.config.ts
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Containerised toolchain — `make test`, `make lint`, `make bench` all run
+  # here so no local Java/Node/Maven is ever required.
+  # Testcontainers talks to the host daemon via the mounted socket.
+  # ---------------------------------------------------------------------------
+  maven:
+    profiles: ["tools"]
+    image: ${MAVEN_IMAGE:-maven:3.9-eclipse-temurin-21}
+    working_dir: /workspace
+    environment:
+      MAVEN_CONFIG: /root/.m2
+      DOCKER_HOST: unix:///var/run/docker.sock
+      TESTCONTAINERS_RYUK_DISABLED: "true"
+      TESTCONTAINERS_HOST_OVERRIDE: ${TESTCONTAINERS_HOST_OVERRIDE:-host.docker.internal}
+    volumes:
+      - ./backend:/workspace
+      - ./scripts:/scripts:ro
+      - maven-repo:/root/.m2
+      - /var/run/docker.sock:/var/run/docker.sock
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    entrypoint: ["mvn"]
+    command: ["-v"]
+
+  node:
+    profiles: ["tools"]
+    image: ${NODE_IMAGE:-node:22-bookworm}
+    working_dir: /workspace
+    volumes:
+      - ./frontend:/workspace
+      - node-modules:/workspace/node_modules
+    entrypoint: ["bash", "-lc"]
+    command: ["node -v"]
+
+  # ---------------------------------------------------------------------------
+  # Playwright (`make e2e` / `make e2e-ui`). Traces + video retained on failure.
+  # ---------------------------------------------------------------------------
+  e2e:
+    profiles: ["e2e"]
+    image: ${PLAYWRIGHT_IMAGE:-mcr.microsoft.com/playwright:v1.49.1-noble}
+    working_dir: /e2e
+    depends_on:
+      frontend:
+        condition: service_healthy
+    environment:
+      E2E_BASE_URL: ${E2E_BASE_URL:-http://frontend:8080}
+      CI: ${CI:-}
+    volumes:
+      - ./e2e:/e2e
+      - e2e-node-modules:/e2e/node_modules
+    entrypoint: ["bash", "-lc"]
+    command: ["npm ci --no-audit --no-fund || npm install --no-audit --no-fund; npx playwright test"]
+
+volumes:
+  cassandra-data:
+  backend-data:
+  maven-repo:
+  node-modules:
+  e2e-node-modules:

@@ -781,6 +781,26 @@ Everything else depends on these contracts, so they are deliberately *not* paral
 | G | Data grid & CRUD | §7 — virtualized grid, editors, statement generation | PK-completeness rule |
 | H | Licensing & Stripe | §9 — Ed25519, gate, provider abstraction, licensing svc | webhook idempotency |
 
+> **Workstream H — already delivered in Phase 0, do not rebuild:** the Ed25519 verifier, trial
+> expiry (§9.4) and purchased version scope (§9.5) are implemented in `cassyx-license` and covered
+> by `TrialAndScopeTest` (12 tests), and `LicenseStatus` in the contract already exposes `state`
+> (incl. `UPGRADE_REQUIRED`), `scope`, `trial`, `expires` and `daysRemaining`.
+>
+> **What is NOT done and is workstream H's job:** the frontend consumes only
+> `{licensed, enforce, bypass, edition}` and **ignores `state` entirely**, so today an
+> `UPGRADE_REQUIRED` or `EXPIRED` licence renders as a generic locked screen. Required:
+> - `UPGRADE_REQUIRED` → an upgrade-purchase screen naming the purchased major vs. the running one.
+>   §9.5 is explicit that this must *invite purchase*, not read as an error — it is a paying
+>   customer, and the only thing standing between them and more revenue is the wording of this screen.
+> - `EXPIRED` trial → a purchase screen showing the expiry date; a live `daysRemaining` countdown
+>   while a trial is still valid.
+> - `MALFORMED` / `INVALID_SIGNATURE` → distinct copy from `ABSENT`; "your key is corrupt" and
+>   "you have no key" are different problems with different fixes.
+>
+> Also still open: minting (the private key lives only in the separate `licensing/` service, §9.3),
+> Stripe Checkout + webhook fulfilment with `event.id` idempotency, and transactional email —
+> which is on the fulfilment critical path, since if it fails a customer has paid and received nothing.
+
 Then Phase 2 (integrating, 3 agents): migration tools (§8), capability matrix + compatibility
 testing across the target matrix (§7.1), and E2E/perf benchmarking.
 

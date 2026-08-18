@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>io.cassyx</groupId>
+    <artifactId>cassyx-parent</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+  </parent>
+  <artifactId>cassyx-migrate</artifactId>
+  <name>cassyx-migrate</name>
+  <description>CQL dump, keyspace copy, JDBC/file import. ImportSource SPI. Plain Java, no Spring.</description>
+
+  <properties>
+    <checkstyle.config.path>${project.parent.basedir}/config/checkstyle.xml</checkstyle.config.path>
+    <!-- section 11.1 gate -->
+    <cassyx.coverage.line>0.75</cassyx.coverage.line>
+  </properties>
+
+  <dependencies>
+    <dependency>
+      <groupId>io.cassyx</groupId>
+      <artifactId>cassyx-core</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.cassyx</groupId>
+      <artifactId>cassyx-bulk</artifactId>
+    </dependency>
+  </dependencies>
+</project>

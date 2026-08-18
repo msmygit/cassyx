@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+# =============================================================================
+# ./cassyx — Windows/WSL/Git-Bash parity wrapper for the Makefile (plan §2.2).
+#
+#   ./cassyx up | down | dev | test | e2e | e2e-ui | bench | verify | seed | ...
+#
+# If GNU Make is available this simply delegates, so there is exactly one
+# implementation of every command. If Make is NOT available (a plain Windows
+# Git-Bash / PowerShell-adjacent shell), the core commands are implemented here
+# directly against docker compose so `./cassyx up` still works with only Docker.
+# =============================================================================
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT"
+
+COMPOSE=(docker compose -f "$ROOT/docker-compose.yml")
+CYAN='\033[36m'; BOLD='\033[1m'; YEL='\033[33m'; OFF='\033[0m'
+say() { printf "${CYAN}▸${OFF} ${BOLD}%s${OFF}\n" "$*"; }
+
+usage() {
+  cat <<'EOF'
+
+cassyx — one-command developer experience (plan §2.2)
+
+  ./cassyx up        build + start the full stack, wait for health, open the UI
+  ./cassyx down      stop everything and remove volumes
+  ./cassyx dev       hot reload: Spring DevTools + Vite HMR
+  ./cassyx test      unit + integration (Testcontainers) + frontend
+  ./cassyx e2e       Playwright, headless
+  ./cassyx e2e-ui    Playwright, headed
+  ./cassyx bench     §11.2 performance benchmarks
+  ./cassyx verify    everything CI runs, locally (pre-push gate)
+  ./cassyx seed      reload demo data
+  ./cassyx db        start only Cassandra 5.x
+  ./cassyx cql       interactive cqlsh
+  ./cassyx logs|ps|config|clean|help
+
+Only Docker is required. Everything else runs in containers.
+
+EOF
+}
+
+CMD="${1:-help}"; shift || true
+
+if [ "$CMD" = "help" ] || [ "$CMD" = "-h" ] || [ "$CMD" = "--help" ]; then
+  usage; exit 0
+fi
+
+# --- preferred path: delegate to make, so there is one implementation --------
+if command -v make >/dev/null 2>&1; then
+  exec make "$CMD" "$@"
+fi
+
+printf "${YEL}! GNU Make not found — using the built-in fallback dispatcher.${OFF}\n" >&2
+printf "  Install make for the full target list (e.g. 'sudo apt install make' in WSL).\n\n" >&2
+
+bash "$ROOT/scripts/preflight.sh" docker env
+
+port() { ( . "$ROOT/.env" 2>/dev/null; eval "echo \${$1:-$2}" ); }
+
+need_module() { bash "$ROOT/scripts/preflight.sh" "$@"; }
+
+case "$CMD" in
+  up)
+    need_module backend frontend
+    say "starting Cassandra 5.x"
+    "${COMPOSE[@]}" up -d cassandra
+    bash "$ROOT/scripts/wait-for-health.sh" cassandra 300
+    "$0" seed
+    say "building backend + frontend"
+    "${COMPOSE[@]}" --profile app up -d --build backend frontend
+    bash "$ROOT/scripts/wait-for-health.sh" backend 300
+    bash "$ROOT/scripts/wait-for-health.sh" frontend 120
+    bash "$ROOT/scripts/open-url.sh" "http://localhost:$(port CASSYX_WEB_PORT 8080)"
+    ;;
+  down)
+    "${COMPOSE[@]}" --profile app --profile dev --profile tools --profile e2e --profile seed \
+      down --volumes --remove-orphans
+    ;;
+  dev)
+    need_module backend frontend
+    "${COMPOSE[@]}" up -d cassandra
+    bash "$ROOT/scripts/wait-for-health.sh" cassandra 300
+    "$0" seed
+    "${COMPOSE[@]}" --profile dev up -d backend-dev frontend-dev
+    bash "$ROOT/scripts/open-url.sh" "http://localhost:$(port CASSYX_VITE_PORT 5173)"
+    ;;
+  db)
+    "${COMPOSE[@]}" up -d cassandra
+    bash "$ROOT/scripts/wait-for-health.sh" cassandra 300
+    ;;
+  seed)
+    "$0" db
+    "${COMPOSE[@]}" --profile seed run --rm seed
+    ;;
+  cql)     "${COMPOSE[@]}" exec cassandra cqlsh "$@" ;;
+  test)
+    need_module backend
+    "${COMPOSE[@]}" --profile tools run --rm --no-deps maven -B -ntp verify
+    need_module frontend
+    "${COMPOSE[@]}" --profile tools run --rm --no-deps node \
+      "npm ci --no-audit --no-fund || npm install --no-audit --no-fund; npm run test -- --coverage --run"
+    ;;
+  e2e)
+    need_module backend frontend e2e
+    CASSYX_NO_OPEN=1 "$0" up
+    "${COMPOSE[@]}" --profile e2e run --rm e2e
+    ;;
+  e2e-ui)
+    need_module backend frontend e2e
+    CASSYX_NO_OPEN=1 "$0" up
+    "${COMPOSE[@]}" --profile e2e run --rm --service-ports e2e \
+      "npm ci --no-audit --no-fund || npm install --no-audit --no-fund; npx playwright test --ui --ui-host=0.0.0.0 --ui-port=8130"
+    ;;
+  bench)   bash "$ROOT/scripts/bench.sh" "$@" ;;
+  compat)  bash "$ROOT/scripts/compat.sh" "$@" ;;
+  verify)
+    for t in test e2e; do "$0" "$t"; done
+    printf '\033[32m✓ verify passed\033[0m\n'
+    ;;
+  logs)    "${COMPOSE[@]}" --profile app --profile dev logs -f --tail=100 ;;
+  ps)      "${COMPOSE[@]}" --profile app --profile dev ps ;;
+  config)  "${COMPOSE[@]}" --profile app --profile dev --profile tools --profile e2e --profile seed config >/dev/null && echo "✓ docker-compose.yml is valid" ;;
+  clean)   "${COMPOSE[@]}" --profile app --profile dev --profile tools --profile e2e --profile seed down --remove-orphans ;;
+  *)       printf "unknown command: %s\n" "$CMD" >&2; usage; exit 2 ;;
+esac

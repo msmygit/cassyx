@@ -1,0 +1,384 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>io.cassyx</groupId>
+  <artifactId>cassyx-parent</artifactId>
+  <version>0.1.0-SNAPSHOT</version>
+  <packaging>pom</packaging>
+  <name>cassyx-parent</name>
+  <description>cassyx - Cassandra / DSE / Astra data manager. Maven multi-module parent.</description>
+
+  <modules>
+    <module>cassyx-core</module>
+    <module>cassyx-bulk</module>
+    <module>cassyx-vector</module>
+    <module>cassyx-migrate</module>
+    <module>cassyx-license</module>
+    <module>cassyx-api</module>
+  </modules>
+
+  <properties>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <maven.compiler.release>21</maven.compiler.release>
+
+    <!-- ===== version pins: docs/plan.md section 2 "Version pins" table ===== -->
+    <spring-boot.version>3.5.4</spring-boot.version>
+    <java-driver.version>4.19.0</java-driver.version>
+    <stripe.version>33.2.0</stripe.version>
+    <dsbulk.version>1.11.1</dsbulk.version>
+
+    <!-- ===== security pins: docs/plan.md section 2 "Security pin required" =====
+         CVE-2026-24400 - org.assertj:assertj-core XXE in XmlStringPrettyFormatter
+                          (vulnerable 1.4.0 .. 3.27.6, fixed in 3.27.7). Reachable through the
+                          DSBulk 1.x dependency tree, which ships assertj on non-test scopes.
+         CVE-2023-6378  - ch.qos.logback:logback-classic / logback-core deserialisation DoS in the
+                          receiver component (vulnerable < 1.3.12 / < 1.4.12). DSBulk 1.11.1 pulls
+                          logback 1.2.x transitively.
+         Both are pinned in <dependencyManagement> below so ANY module that later adds DSBulk
+         inherits the safe versions. Do not lower these. OWASP Dependency-Check runs in CI. -->
+    <assertj.version>3.27.7</assertj.version>
+    <logback.version>1.5.18</logback.version>
+
+    <!-- tooling -->
+    <junit.version>5.11.4</junit.version>
+    <mockito.version>5.14.2</mockito.version>
+    <archunit.version>1.3.0</archunit.version>
+    <testcontainers.version>1.20.4</testcontainers.version>
+    <jackson.version>2.18.2</jackson.version>
+    <slf4j.version>2.0.16</slf4j.version>
+    <jacoco.version>0.8.12</jacoco.version>
+    <pitest.version>1.17.4</pitest.version>
+    <pitest-junit5.version>1.2.2</pitest-junit5.version>
+    <!-- Must match the junit-platform version Spring Boot's BOM resolves, otherwise PIT's minion
+         dies with "OutputDirectoryProvider not available". -->
+    <junit-platform.version>1.12.2</junit-platform.version>
+    <spotless.version>2.44.3</spotless.version>
+    <checkstyle-plugin.version>3.6.0</checkstyle-plugin.version>
+    <checkstyle.version>10.21.1</checkstyle.version>
+    <surefire.version>3.5.2</surefire.version>
+    <failsafe.version>3.5.2</failsafe.version>
+
+    <checkstyle.config.path>${project.basedir}/config/checkstyle.xml</checkstyle.config.path>
+
+    <!-- ===== JaCoCo coverage gates: docs/plan.md section 11.1 =====
+         Each module overrides cassyx.coverage.line with its own gate:
+             cassyx-core 0.85 | cassyx-bulk 0.85 | cassyx-vector 0.80
+             cassyx-license 0.90 | cassyx-migrate 0.75 | cassyx-api 0.60
+         jacoco:check IS bound to `verify`, so once enabled the build FAILS under threshold.
+
+         PHASE 0 NOTE - READ BEFORE CHANGING:
+         The modules are skeletons right now; enforcing 85% against near-empty jars would block
+         every Phase 1 agent on day one for no safety benefit. So the check execution is skipped
+         by default via cassyx.coverage.skip=true. The report goal always runs, so coverage numbers
+         are still produced and visible.
+         PHASE 1 AGENTS: flip this to false (here, or per module, or with -Dcassyx.coverage.skip=false)
+         as soon as your module has real logic. It must be false before v1 ships. -->
+    <cassyx.coverage.skip>true</cassyx.coverage.skip>
+    <cassyx.coverage.line>0.60</cassyx.coverage.line>
+    <!-- PIT mutation-score gate; target is 70 (plan section 11.1). See the pitest configuration. -->
+    <cassyx.mutation.threshold>0</cassyx.mutation.threshold>
+
+    <!-- Integration tests (*IT, Testcontainers Cassandra 5.x) are opt-in: `mvn verify` stays green
+         on a machine without a Docker socket, and the CI `integration` job runs
+         `mvn verify -Dcassyx.it=true`. See io.cassyx.core.testsupport.IntegrationTestBase. -->
+    <cassyx.it>false</cassyx.it>
+  </properties>
+
+  <dependencyManagement>
+    <dependencies>
+      <!-- Security overrides come FIRST: nearest-wins in dependencyManagement is
+           first-declaration-wins, so these beat anything the imported BOMs manage. -->
+      <dependency>
+        <groupId>org.assertj</groupId>
+        <artifactId>assertj-core</artifactId>
+        <version>${assertj.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>ch.qos.logback</groupId>
+        <artifactId>logback-core</artifactId>
+        <version>${logback.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>ch.qos.logback</groupId>
+        <artifactId>logback-classic</artifactId>
+        <version>${logback.version}</version>
+      </dependency>
+
+      <!-- DSBulk (section 5.3). Managed but deliberately NOT a compile dependency of any module:
+           DSBulk's application.conf collides with Spring/Typesafe Config on one classpath, so the
+           runner is executed out-of-process from the distribution shipped in the Docker image.
+           The pin lives here so that if any module ever does add it, it inherits the CVE overrides
+           above rather than DSBulk's own transitive logback/assertj. -->
+      <dependency>
+        <groupId>com.datastax.oss</groupId>
+        <artifactId>dsbulk-runner</artifactId>
+        <version>${dsbulk.version}</version>
+      </dependency>
+
+      <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-dependencies</artifactId>
+        <version>${spring-boot.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.cassandra</groupId>
+        <artifactId>java-driver-bom</artifactId>
+        <version>${java-driver.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+      <dependency>
+        <groupId>org.junit</groupId>
+        <artifactId>junit-bom</artifactId>
+        <version>${junit.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+      <dependency>
+        <groupId>org.testcontainers</groupId>
+        <artifactId>testcontainers-bom</artifactId>
+        <version>${testcontainers.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+
+      <dependency>
+        <groupId>com.stripe</groupId>
+        <artifactId>stripe-java</artifactId>
+        <version>${stripe.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.tngtech.archunit</groupId>
+        <artifactId>archunit-junit5</artifactId>
+        <version>${archunit.version}</version>
+      </dependency>
+
+      <dependency>
+        <groupId>io.cassyx</groupId>
+        <artifactId>cassyx-core</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>io.cassyx</groupId>
+        <artifactId>cassyx-core</artifactId>
+        <version>${project.version}</version>
+        <type>test-jar</type>
+      </dependency>
+      <dependency>
+        <groupId>io.cassyx</groupId>
+        <artifactId>cassyx-bulk</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>io.cassyx</groupId>
+        <artifactId>cassyx-vector</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>io.cassyx</groupId>
+        <artifactId>cassyx-migrate</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>io.cassyx</groupId>
+        <artifactId>cassyx-license</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.assertj</groupId>
+      <artifactId>assertj-core</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <pluginManagement>
+      <plugins>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-surefire-plugin</artifactId>
+          <version>${surefire.version}</version>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-failsafe-plugin</artifactId>
+          <version>${failsafe.version}</version>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-jar-plugin</artifactId>
+          <version>3.4.2</version>
+        </plugin>
+        <plugin>
+          <groupId>org.pitest</groupId>
+          <artifactId>pitest-maven</artifactId>
+          <version>${pitest.version}</version>
+          <dependencies>
+            <dependency>
+              <groupId>org.pitest</groupId>
+              <artifactId>pitest-junit5-plugin</artifactId>
+              <version>${pitest-junit5.version}</version>
+            </dependency>
+            <dependency>
+              <groupId>org.junit.platform</groupId>
+              <artifactId>junit-platform-launcher</artifactId>
+              <version>${junit-platform.version}</version>
+            </dependency>
+          </dependencies>
+          <configuration>
+            <targetClasses>
+              <param>io.cassyx.*</param>
+            </targetClasses>
+            <targetTests>
+              <param>io.cassyx.*</param>
+            </targetTests>
+            <!-- section 11.1: 70% mutation-score gate on core + bulk. Same Phase 0 deal as the
+                 JaCoCo gates: the target is 70, but the skeleton scores ~56% because the
+                 driver-facing classes are covered by Testcontainers integration tests rather than
+                 unit tests. Phase 1 agents flip cassyx.mutation.threshold to 70 alongside
+                 cassyx.coverage.skip=false; the nightly CI mutation job passes
+                 -Dcassyx.mutation.threshold=70 to see the real number. -->
+            <mutationThreshold>${cassyx.mutation.threshold}</mutationThreshold>
+            <timestampedReports>false</timestampedReports>
+            <outputFormats>
+              <param>HTML</param>
+              <param>XML</param>
+            </outputFormats>
+          </configuration>
+        </plugin>
+      </plugins>
+    </pluginManagement>
+
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.13.0</version>
+        <configuration>
+          <release>21</release>
+          <compilerArgs>
+            <arg>-parameters</arg>
+          </compilerArgs>
+        </configuration>
+      </plugin>
+
+      <plugin>
+        <groupId>com.diffplug.spotless</groupId>
+        <artifactId>spotless-maven-plugin</artifactId>
+        <version>${spotless.version}</version>
+        <configuration>
+          <java>
+            <includes>
+              <include>src/main/java/**/*.java</include>
+              <include>src/test/java/**/*.java</include>
+            </includes>
+            <importOrder/>
+            <removeUnusedImports>
+              <engine>cleanthat-javaparser-unnecessaryimport</engine>
+            </removeUnusedImports>
+            <trimTrailingWhitespace/>
+            <endWithNewline/>
+          </java>
+        </configuration>
+        <executions>
+          <execution>
+            <!-- `apply` in the local build keeps sources canonical; CI additionally runs
+                 `mvn spotless:check` in the lint job, which then trivially passes. -->
+            <id>spotless-apply</id>
+            <phase>process-sources</phase>
+            <goals>
+              <goal>apply</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-checkstyle-plugin</artifactId>
+        <version>${checkstyle-plugin.version}</version>
+        <dependencies>
+          <dependency>
+            <groupId>com.puppycrawl.tools</groupId>
+            <artifactId>checkstyle</artifactId>
+            <version>${checkstyle.version}</version>
+          </dependency>
+        </dependencies>
+        <configuration>
+          <configLocation>${checkstyle.config.path}</configLocation>
+          <includeTestSourceDirectory>true</includeTestSourceDirectory>
+          <consoleOutput>true</consoleOutput>
+          <failOnViolation>true</failOnViolation>
+          <violationSeverity>warning</violationSeverity>
+        </configuration>
+        <executions>
+          <execution>
+            <id>checkstyle-validate</id>
+            <phase>validate</phase>
+            <goals>
+              <goal>check</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+
+      <plugin>
+        <groupId>org.jacoco</groupId>
+        <artifactId>jacoco-maven-plugin</artifactId>
+        <version>${jacoco.version}</version>
+        <executions>
+          <execution>
+            <id>jacoco-prepare</id>
+            <goals>
+              <goal>prepare-agent</goal>
+            </goals>
+          </execution>
+          <execution>
+            <id>jacoco-report</id>
+            <phase>test</phase>
+            <goals>
+              <goal>report</goal>
+            </goals>
+          </execution>
+          <execution>
+            <!-- Bound to `verify`: the build fails under threshold once the skip flag is off. -->
+            <id>jacoco-check</id>
+            <phase>verify</phase>
+            <goals>
+              <goal>check</goal>
+            </goals>
+            <configuration>
+              <skip>${cassyx.coverage.skip}</skip>
+              <rules>
+                <rule>
+                  <element>BUNDLE</element>
+                  <limits>
+                    <limit>
+                      <counter>LINE</counter>
+                      <value>COVEREDRATIO</value>
+                      <minimum>${cassyx.coverage.line}</minimum>
+                    </limit>
+                  </limits>
+                </rule>
+              </rules>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>

@@ -1,0 +1,16 @@
+{
+  "name": "cassyx-e2e",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Playwright E2E harness for cassyx (plan §11.2). Runs in the official Playwright container, so no local Node is required.",
+  "type": "module",
+  "scripts": {
+    "test": "playwright test",
+    "test:ui": "playwright test --ui --ui-host=0.0.0.0 --ui-port=8130",
+    "test:bench": "playwright test --grep @bench",
+    "report": "playwright show-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.49.1"
+  }
+}

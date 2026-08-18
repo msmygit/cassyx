@@ -1,0 +1,54 @@
+# --- local environment -------------------------------------------------------
+.env
+.env.local
+*.local
+
+# --- secrets / credentials (never commit; gitleaks runs in `make security`) ---
+*.pem
+*.p12
+*.jks
+*.keystore
+*.truststore
+secure-connect-*.zip
+licensing/keys/
+
+# --- Java / Maven ------------------------------------------------------------
+target/
+*.class
+*.jar
+!.mvn/wrapper/maven-wrapper.jar
+.mvn/timing.properties
+dependency-check-report.*
+pit-reports/
+
+# --- Node / Vite -------------------------------------------------------------
+node_modules/
+dist/
+.vite/
+coverage/
+*.tsbuildinfo
+npm-debug.log*
+yarn-error.log*
+.pnpm-store/
+
+# --- Playwright --------------------------------------------------------------
+e2e/test-results/
+e2e/playwright-report/
+e2e/blob-report/
+e2e/.playwright/
+e2e/.auth/
+
+# --- cassyx runtime artefacts ------------------------------------------------
+.cassyx-out/
+bench/compat-results.txt
+*.h2.db
+*.mv.db
+*.trace.db
+
+# --- IDE / OS ----------------------------------------------------------------
+.idea/
+*.iml
+.vscode/
+!.vscode/extensions.json
+.DS_Store
+Thumbs.db

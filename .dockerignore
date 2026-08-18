@@ -1,0 +1,46 @@
+# Root .dockerignore — keeps build contexts small and secrets out of images.
+# backend/ and frontend/ should each carry their own .dockerignore as well;
+# this one applies to any build whose context is the repo root.
+
+.git
+.github
+.gitignore
+.env
+.env.*
+!.env.example
+
+# build output
+**/target
+**/dist
+**/node_modules
+**/coverage
+**/.vite
+**/*.tsbuildinfo
+
+# test / bench artefacts
+e2e/test-results
+e2e/playwright-report
+e2e/blob-report
+bench/compat-results.txt
+.cassyx-out
+
+# local databases
+**/*.h2.db
+**/*.mv.db
+**/*.trace.db
+
+# credentials — never bake these into an image
+**/*.pem
+**/*.p12
+**/*.jks
+**/*.keystore
+**/*.truststore
+**/secure-connect-*.zip
+licensing/keys
+
+# docs / editor noise
+docs
+**/.idea
+**/.vscode
+**/.DS_Store
+**/*.iml
