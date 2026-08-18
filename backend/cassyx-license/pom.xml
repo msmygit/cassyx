@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>io.cassyx</groupId>
+    <artifactId>cassyx-parent</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+  </parent>
+  <artifactId>cassyx-license</artifactId>
+  <name>cassyx-license</name>
+  <description>Ed25519 license verification and the PaymentProvider SPI. No driver, no Spring.</description>
+
+  <properties>
+    <checkstyle.config.path>${project.parent.basedir}/config/checkstyle.xml</checkstyle.config.path>
+    <!-- section 11.1 gate -->
+    <cassyx.coverage.line>0.90</cassyx.coverage.line>
+  </properties>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-api</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+    </dependency>
+    <!-- Stripe SDK is pinned in the parent (33.2.0, API version 2026-07-29.dahlia) and is added by
+         the Phase 1 workstream H agent together with StripePaymentProvider. NoopPaymentProvider
+         needs no dependencies, which is exactly the point of the SPI. -->
+  </dependencies>
+</project>

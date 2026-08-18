@@ -1,0 +1,885 @@
+# cassyx — Implementation Plan
+
+> **Note:** In plan mode I can only write to this file. On approval, step 0 is to copy this
+> to `/Users/mrkr/Documents/00_coderepos/cassyx/docs/plan.md` as the canonical in-repo spec.
+
+---
+
+## 1. Context
+
+### The problem
+
+There is no good open tool for working with data in Apache Cassandra / DSE / Astra DB / other
+CQL-compatible stores. The landscape today:
+
+| Tool | Gap |
+| --- | --- |
+| `cqlsh` | CLI only. No grid, no schema tree, no export beyond `COPY`. Strong at `TRACING`/consistency. |
+| DataStax DevCenter | Abandoned. |
+| DBeaver CE | Cassandra driver is a PRO/plugin feature, not in the free core. |
+| Beekeeper Studio | Cassandra is paid-tier only. |
+| NoSQL Manager for Cassandra | $119, **Windows-only in practice**, closed source. Richest feature set — our functional benchmark. |
+| DBVisualizer / TablePlus | Cassandra support is shallow ("quick checks"). |
+| DSBulk | Excellent at bulk load/unload; CLI-only, HOCON config, no UI, no schema browsing. |
+| Astra Console / DataStax Studio | Locks you to DataStax-managed infra. |
+
+The prior-art prototype at `/Users/mrkr/Downloads/cqlens` (FastAPI + React, Dockerized) proves
+the shape of the UI but is architecturally capped:
+
+- Exports serialize **client-side** from an already-fetched result set → bounded by `LIMIT 100`.
+- Auto-generated query hardcodes `LIMIT 100`; **no paging state / cursor handling anywhere**.
+- Read-only: no DDL, no row CRUD, no INSERT/UPDATE/DELETE generation.
+- No query history, saved scripts, multi-tab, result search/sort, or schema search.
+- Single global backend driver session — no multi-user isolation.
+- **Known bug in the reference screenshots:** dropping `demo.users` produced
+  `SELECT * FROM system_auth.users LIMIT 100` — the drop handler resolves the keyspace from the
+  wrong tree node. Do not port this logic; see §7.3.
+- `/api/table_stats` exists with no UI; INDEXES and COMMENT modal tabs are never populated.
+
+### The outcome we want
+
+`cassyx` — a self-hosted, Dockerized web application (React frontend, Java backend) that is
+simultaneously:
+
+1. A **first-class CQL IDE and data manager** — matching the NoSQL Manager for Cassandra feature
+   matrix (full object management, editable grid, CQL dump, keyspace copy, cross-DB import).
+2. A **blazing-fast bulk data mover** — DSBulk-class unload/load throughput, driven from a UI,
+   with DSBulk's full settings surface exposed but sane auto-derived defaults.
+3. **Vector-native** — SAI, `vector<float, N>` columns, and ANN queries are first-class citizens,
+   not an afterthought.
+4. **Commercially sellable** — one-time Stripe payment unlocking the whole product, with a
+   documented bypass flag for self-hosting/dev/enterprise.
+
+### Decisions already made (locked)
+
+- **Form factor:** self-hosted web app, Docker Compose. Not desktop, not Electron.
+- **Stack:** React + TypeScript frontend, **Java** backend.
+- **Driver:** `org.apache.cassandra:java-driver-core` (the ASF-owned 4.x line, ASF since 4.18).
+  Chosen over `scylla-rust-driver` specifically because it natively supports Astra's
+  **secure connect bundle** via `CqlSessionBuilder.withCloudSecureConnectBundle(...)`, which the
+  Rust driver does not. It is also the driver DSBulk is built on, so one driver serves both paths.
+- **Licensing:** everything is one paid tier (no free/pro split). One-time payment. A bypass flag
+  disables all license enforcement.
+- **Scope:** everything lands in v1, including vector/SAI/ANN.
+- **Build method:** parallel subagent workstreams (§10).
+
+---
+
+## 2. Architecture
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│  Browser — React 19 + TypeScript + Vite                              │
+│  MUI v6 · TanStack Query · TanStack Table (virtualized) · CodeMirror6│
+└───────────────┬──────────────────────────────────────────────────────┘
+                │ REST + SSE (job progress) + streaming downloads
+┌───────────────▼──────────────────────────────────────────────────────┐
+│  cassyx-api      Spring Boot 3.5 · Java 21 · virtual threads         │
+│  ├─ cassyx-core     session registry, schema catalog, CQL exec, paging│
+│  ├─ cassyx-bulk     token-range parallel unload + DSBulk embedding    │
+│  ├─ cassyx-vector   SAI / vector / ANN services                       │
+│  ├─ cassyx-migrate  CQL dump, keyspace copy, JDBC import              │
+│  └─ cassyx-license  Ed25519 verification + Stripe Checkout/webhooks   │
+│                                                                       │
+│  H2 (file mode) — connections, saved scripts, history, jobs, license  │
+└───────────────┬──────────────────────────────────────────────────────┘
+                │ CQL binary protocol v4/v5 (token-aware, LZ4)
+┌───────────────▼──────────────────────────────────────────────────────┐
+│  Apache Cassandra 3.11/4.x/5.x · DSE 5–6.9 · Astra DB (SCB)          │
+│  Amazon Keyspaces · ScyllaDB                                          │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+### Why this beats the cqlens architecture
+
+The single most important design rule: **bulk data must never round-trip through the browser.**
+
+- cqlens: driver → Python → JSON → HTTP → browser → `Blob` download. Caps at the result set.
+- cassyx: driver → Java → encoder → `StreamingResponseBody` (or file on a mounted volume),
+  with **N token ranges pulled in parallel**. The browser only ever receives a progress stream
+  and a download handle.
+
+### Monorepo layout
+
+```
+cassyx/
+├── docs/plan.md                    ← this document
+├── docker-compose.yml              app + cassandra (profile: dev)
+├── backend/
+│   ├── pom.xml                     Maven multi-module, Java 21
+│   ├── cassyx-core/
+│   ├── cassyx-bulk/
+│   ├── cassyx-vector/
+│   ├── cassyx-migrate/
+│   ├── cassyx-license/
+│   └── cassyx-api/                 Spring Boot app; produces the fat jar
+├── frontend/                       Vite + React + TS
+├── openapi/cassyx-api.yaml         ← CONTRACT. Written first. See §10.
+└── e2e/                            Playwright
+```
+
+### Version pins
+
+| Component | Version | Note |
+| --- | --- | --- |
+| Java | 21 LTS | virtual threads for per-range scan tasks |
+| Spring Boot | 3.5.x | |
+| `java-driver-core` | 4.19.3 | ASF-owned; `CqlVector` since 4.16, vector in QueryBuilder via JAVA-3118 |
+| DSBulk | 1.11.2 | `com.datastax.oss:dsbulk-runner` |
+| React | 19 | |
+| Vite | 6 | |
+| Stripe Java SDK | 33.3.0 | API version `2026-07-29.dahlia` |
+
+> **Security pin required:** `mvnrepository` flags **CVE-2026-24400** and **CVE-2023-6378** against
+> DSBulk 1.x transitive dependencies. Add explicit `<dependencyManagement>` overrides and wire
+> OWASP Dependency-Check into CI. Do not ship without this — it is a blocker, not a nice-to-have.
+
+### 2.1 Modularity & reusability contract
+
+**Non-negotiable rule: every module must be usable without Spring, without the web layer, and
+without the UI.** A developer should be able to add `cassyx-bulk` to an unrelated Java project and
+run a token-range parallel unload with nothing but a `CqlSession`.
+
+This forces a clean design and it is what makes the parallel agent workstreams (§10) possible at
+all — agents can only work independently if the seams are real.
+
+| Module | Depends on | Public entry point | Spring? |
+| --- | --- | --- | --- |
+| `cassyx-core` | driver only | `SessionFactory`, `SchemaCatalog`, `QueryExecutor`, `CqlLexer` | **no** |
+| `cassyx-bulk` | `cassyx-core` | `UnloadEngine`, `LoadEngine`, `CountEngine`, `Encoder` SPI | **no** |
+| `cassyx-vector` | `cassyx-core` | `VectorService`, `AnnQueryBuilder`, `SaiIndexManager` | **no** |
+| `cassyx-migrate` | `core`, `bulk` | `CqlDumper`, `KeyspaceCopier`, `JdbcImporter` | **no** |
+| `cassyx-license` | none | `PaymentProvider` SPI, `LicenseVerifier` | **no** |
+| `cassyx-api` | all of the above | Spring Boot app — REST/SSE adapters only | yes |
+
+Rules that enforce this:
+
+- **Spring annotations exist only in `cassyx-api`.** Lower modules are plain Java with constructor
+  injection; `cassyx-api` supplies `@Bean` wiring. Enforced in CI by an ArchUnit rule that fails
+  the build on any `org.springframework` import below `cassyx-api`.
+- **No module depends on a sibling's implementation package** — only on its `…api` package.
+  ArchUnit-enforced.
+- **Extension points are SPIs, not `if/else` chains.** `Encoder` (CSV/JSON/Parquet/XML/Excel),
+  `Sink` (HTTP/file/S3), `PaymentProvider` (Stripe/Noop), `ImportSource` (CSV/Excel/MySQL/SQL
+  Server), and `CapabilityProbe` are all `ServiceLoader`-discoverable. Adding a Parquet writer or a
+  second payment processor means adding one class, not editing five.
+- Each module publishes its own jar and its own README with a runnable snippet.
+- **No shared mutable state between modules.** All cross-module communication is via the module's
+  interface or an immutable value object.
+
+### 2.2 One-command developer experience
+
+Everything — app, database, tests, E2E — behind single commands. A `Makefile` (and an equivalent
+`./cassyx` script for Windows/WSL parity) is the only entry point anyone needs to learn:
+
+```
+make up            # ⇐ THE one command: builds and starts the full stack
+                   #   (Cassandra 5.x seeded with demo data + backend + frontend),
+                   #   waits for health, opens http://localhost:8080
+make down          # stop and clean volumes
+make dev           # hot-reload mode: Spring DevTools + Vite HMR against the same Cassandra
+make test          # unit + integration (Testcontainers) + frontend, with coverage gates
+make e2e           # Playwright against a freshly seeded stack, headless
+make e2e-ui        # same, headed, for debugging
+make bench         # the §11 performance benchmarks
+make verify        # everything CI runs, locally — the pre-push gate
+make seed          # reload demo data (incl. a vector table for ANN)
+```
+
+`make up` must work on a clean checkout with **only Docker and Make installed** — no local Java,
+Node, or Maven. Multi-stage Dockerfiles build inside containers. Cassandra readiness is a real
+health check (`cqlsh -e "describe keyspaces"`), not a `sleep`. Ports and credentials come from a
+committed `.env.example` copied to `.env` automatically on first run.
+
+The seed dataset deliberately exercises the hard paths: collections, UDTs, tuples, counters, blobs,
+static columns, a `vector<float, 1536>` column with an SAI index, a deliberately skewed partition
+(for the §5.2 work-stealing test), and a wide 1000-column table (for the grid benchmark).
+
+### 2.3 API contract — normative rules
+
+`openapi/cassyx-api.yaml` is **the** coordination artifact. Eight Phase 1 workstreams implement
+against it in parallel and the frontend generates its typed client from it, so a broken spec breaks
+every agent at once. These rules are binding on every agent.
+
+**Version and validation**
+
+- **OpenAPI `3.1.1`** — the current patch of the 3.1 line. **Do not use 3.2.0**: it exists, but
+  tooling (openapi-typescript, codegen, Swagger UI) still lags, and this file is a *build
+  dependency* for the frontend. Do not use 3.0.x either — we rely on 3.1's full JSON Schema
+  alignment (`examples` arrays, `const`, proper `null` typing).
+- **The spec must lint with zero errors AND zero warnings:**
+  ```
+  npx @redocly/cli lint openapi/cassyx-api.yaml
+  ```
+  This is a CI gate (§11.1, `contract` job) and part of `make verify`. A red spec fails the build.
+- **Every `$ref` must resolve.** The most common failure mode observed so far is writing paths
+  without defining their `components/schemas` — it lints red and silently breaks `gen:api`. Count
+  check: referenced schema names must be a subset of defined ones.
+
+**Structural rules**
+
+- Every operation has a unique camelCase `operationId` (these become generated client method names)
+  and exactly one workstream tag: `connections`, `schema`, `query`, `bulk`, `vector`, `data`,
+  `migrate`, `license`, `billing`, `capabilities`.
+- No inline anonymous objects for anything non-trivial — every DTO is a named, referenced schema.
+- Every operation declares its error responses using the shared **RFC 9457 `application/problem+json`**
+  schema. No bare 4XX/5XX, no ad-hoc error shapes.
+- Realistic `example` values throughout; examples must validate against their own schema.
+- `servers` is a relative `/` plus documented variables — never a hardcoded localhost or example.com.
+- SSE endpoints declare `text/event-stream` and define their event payload schema well enough for
+  the frontend to type the stream.
+
+**Security rules encoded in the contract, not just the implementation**
+
+- Secrets are **write-only**: passwords, Astra tokens, keystore contents, and Stripe keys appear in
+  request schemas only. Response schemas expose boolean presence flags (`hasPassword`) and never the
+  value. Error responses must not echo them.
+- Credentials never appear in path or query parameters — request body or header only, so they stay
+  out of access logs and browser history.
+- Ungated paths are exactly `/api/health`, `/api/license/**`, `/api/billing/**` (§9.1). Everything
+  else is license-gated; reflect that in the spec's security definitions.
+
+**Change protocol during Phase 1**
+
+- The spec is **append-only** while Phase 1 runs. Adding operations or schemas is fine; renaming or
+  changing the shape of an existing one breaks other agents mid-flight.
+- A breaking change requires an explicit note to the orchestrator, who re-broadcasts to affected
+  workstreams. Do not silently edit a schema another workstream is coding against.
+- Contract first, always: **change the spec, then implement.** Backend endpoints that drift from the
+  spec are a defect even when they work — the `contract` CI job catches drift by validating live
+  responses against the schema (§11.1).
+
+---
+
+## 3. Connection management
+
+Backing table: `cassyx_connection`. Credentials encrypted at rest with **AES-256-GCM**, key from
+`CASSYX_SECRET_KEY` (env). **Secrets are never returned to the client** — the API returns
+`hasPassword: true`, never the value.
+
+Three connection modes:
+
+| Mode | Fields |
+| --- | --- |
+| **Cassandra / DSE** | contact points (host:port list), local datacenter, username, password, protocol version override |
+| **Astra DB** | Astra token (`AstraCS:…`) + secure connect bundle, acquired by one of three modes (§3.1) |
+| **Advanced** | raw `application.conf` (HOCON) passthrough for exotic setups |
+
+**SCB acquisition modes** — the Astra form has a mode selector; all three are first-class:
+
+| Mode | When to use | Notes |
+| --- | --- | --- |
+| `AUTO_DOWNLOAD` *(default)* | normal use — token only | fetch via DevOps API (§3.1); no UUID typing |
+| `UPLOAD` | air-gapped, restricted egress, or a hand-issued bundle | multipart upload, stored encrypted |
+| `PATH` | Docker/K8s deployments mounting the bundle as a volume or secret | server-side filesystem path |
+
+`PATH` mode resolves **on the backend host**, so the file must be visible to the *server* container,
+not the user's laptop. This is the mode cqlens implemented as its only option, which is why cqlens
+could not be deployed anywhere but the user's own machine — here it is one deliberate choice among
+three, and the UI says plainly that the path is server-side. Guard rails: resolve against a
+configurable allow-list root (`CASSYX_SCB_PATH_ROOT`, default `/etc/cassyx/scb`) and reject path
+traversal outside it — an unrestricted server-side path parameter is an arbitrary-file-read
+primitive. Validate the file is a readable zip containing the expected bundle entries before
+attempting connection, so a wrong path fails with a clear message rather than a TLS error.
+
+#### 3.1 Astra SCB auto-download (DevOps API)
+
+Typing a database UUID and hunting for a bundle in the Astra console is the worst part of
+connecting to Astra. Given only the Astra token, we can enumerate databases and fetch the bundle
+directly. Modeled on DataStax's own `AstraDevOpsClient` in
+[cassandra-data-migrator](https://github.com/datastax/cassandra-data-migrator/blob/main/src/main/java/com/datastax/cdm/data/AstraDevOpsClient.java),
+with the deviations noted below.
+
+**API contract (verified against that source):**
+
+```
+POST https://api.astra.datastax.com/v2/databases/{databaseId}/secureBundleURL?all=true
+  Authorization: Bearer <AstraCS:…>
+  Content-Type: application/json
+  (no request body)
+
+200 → JSON ARRAY, one node per datacenter:
+  [ { "region": "us-east1",
+      "downloadURL": "https://…",                       ← the "default" bundle
+      "customDomainBundles": [ { "domain": "…", "downloadURL": "https://…" } ] },
+    … ]
+```
+
+Selection algorithm: match the array element whose `region` equals the requested region
+(case-insensitive); if no region is requested, take the first element. Then pick `downloadURL` for
+type `default`, or search `customDomainBundles[]` for a matching `domain` for type `custom`.
+Download the zip over plain HTTPS GET (no auth header on that URL — it is pre-signed).
+
+**Deviations from the reference implementation — deliberate, do not "fix" back:**
+
+1. **The reference has a latent bug we must not copy.** Its javadoc documents three SCB types —
+   `default`, `region`, `custom` — but the `switch` only implements `default` and `custom`. Passing
+   `region` falls through to `default:` and logs *"Unknown SCB type"*. Regional selection in fact
+   happens via the `region` field match, independently of `scbType`. **Our model therefore has two
+   orthogonal inputs — `region` (optional) and `scbType` ∈ {`default`, `custom`} — not three
+   types.** Validate and reject anything else with a clear message.
+2. **NPE guard:** the reference calls `scbType.toLowerCase()` without a null check. Default to
+   `default` when absent.
+3. **UX we add on top:** `GET /v2/databases` to populate a **database picker** (name, id, status,
+   regions) so the user never types a UUID, and a **region dropdown** populated from the
+   `secureBundleURL` response rather than free text. Auto-download is the default path; manual
+   upload remains for air-gapped or restricted-egress installs.
+4. **Storage:** the reference writes to a temp file with `deleteOnExit`. We store the bundle
+   encrypted in H2 alongside the connection (same AES-256-GCM as credentials) and materialize it to
+   a session-scoped temp file, so a connection stays reusable across restarts without re-downloading.
+5. **Caching + refresh:** cache the bundle against `(databaseId, region, scbType, domain)` with an
+   explicit "re-download bundle" action — Astra rotates bundles, and a stale bundle produces a
+   confusing TLS failure rather than an obvious error.
+6. **Egress awareness:** if `api.astra.datastax.com` is unreachable, fail with an actionable message
+   pointing at manual upload — do not retry silently. Per §9.1 many Cassandra installs have no egress.
+
+**Security:** the Astra token is a full-privilege credential. It is write-only in the API, encrypted
+at rest, masked in the UI, and **never logged** — including in DevOps API error paths, which is
+exactly where tokens usually leak. Add a test asserting the token never appears in log output.
+
+> **Fix vs. cqlens:** cqlens took the SCB as a *local filesystem path*, which forces backend and
+> bundle onto the same host and makes the tool undeployable. cassyx uploads the bundle, stores it
+> encrypted in H2, and materializes it to a temp file scoped to the session's lifetime.
+> Also: mask the Astra token in the UI (cqlens showed it in plaintext).
+
+Plus, from the NoSQL Manager matrix: **SSH tunnel** support (JSch/sshd — local port forward before
+session build), **SSL/mTLS** (truststore/keystore upload), and **multiple simultaneous cluster
+connections**.
+
+Session lifecycle: a `SessionRegistry` keyed by `(userId, connectionId)` holds `CqlSession`
+instances with an idle-eviction TTL (default 30 min). `CqlSession` is expensive and thread-safe —
+one per connection, never per request. Health-check endpoint drives the UI's connected indicator.
+
+**Compatibility targets:** Apache Cassandra 2.1→5.x, DSE 4.0→6.9, Astra DB, Amazon Keyspaces,
+ScyllaDB + ScyllaDB Cloud. Capability detection at connect time (§7.1) gates features per target.
+
+---
+
+## 4. Schema & object management
+
+### Catalog
+
+Read from `session.getMetadata()` — the driver maintains a live, event-driven schema cache; do not
+poll `system_schema`. Expose keyspaces → tables/views/UDTs/UDFs/aggregates → columns/indexes.
+
+Frontend tree carries the **fully-qualified identity on every node** (`{keyspace, table}`) so drag,
+selection, and context menus resolve from the node's own payload — this is the direct fix for the
+cqlens keyspace-resolution bug. System keyspaces collapse under a toggleable "Show system" filter.
+Add the schema search box cqlens lacks.
+
+### Full DDL coverage (v1)
+
+Every object type gets a visual editor **and** a "Preview CQL" pane — the generated statement is
+always shown and always editable before execution. Never execute generated DDL silently.
+
+- **Keyspaces** — create/alter/drop; `SimpleStrategy` vs `NetworkTopologyStrategy` with per-DC RF
+  pickers; durable writes.
+- **Tables** — create/alter/truncate/drop; partition & clustering key builder with ordering;
+  static columns; full `WITH` options surface (compaction strategy + subproperties, compression,
+  caching, `bloom_filter_fp_chance`, `gc_grace_seconds`, `default_time_to_live`, `read_repair`,
+  `speculative_retry`, index intervals).
+- **Columns** — add/drop/rename/alter, incl. collections (`list`/`set`/`map`), frozen types,
+  tuples, counters, `vector<float, N>`.
+- **Indexes** — **SAI** (primary path on C* 5.x / Astra), legacy 2i, and DSE Search. See §6.
+- **Materialized views** — create/alter/drop with base-table awareness.
+- **UDTs** — create/alter/drop, plus nested-type rendering in the grid.
+- **UDFs & UDAs** — create/drop, language selection, `CALLED ON NULL INPUT` semantics.
+- **Roles & permissions** — create/alter/drop role, `GRANT`/`REVOKE`, permission matrix view.
+
+**Describe / DDL export:** use `TableMetadata#describe(true)`. Note **CASSJAVA-2** — older 4.x
+patches emitted invalid CQL for vector-typed columns. 4.19.0 is required for correct vector DDL;
+add a regression test asserting a `vector<float,1536>` column round-trips through `describe`.
+
+### Table info panel
+
+Reinstates what cqlens stubbed: **Fields** (name/type/kind — `partition_key`|`clustering`|
+`regular`|`static` — with comments), **Indexes** (actually populated: name, target, kind, options),
+**Comment** (editable), **Definition** (`describe`), and **Statistics** — the panel cqlens had an
+API for but never built: per-node/per-token-range row estimates and top-N largest partitions,
+sourced from the DSBulk `count` workflow (§5.4).
+
+---
+
+## 5. The fast data path
+
+This is the differentiator. Three distinct engines, chosen per task.
+
+### 5.1 Interactive query execution
+
+For the CQL editor and grid — correctness and responsiveness, not raw throughput.
+
+- **Server-side paging via driver `PagingState`.** Fetch size default 500. The paging state is an
+  opaque token cached server-side against a result-set handle; the client requests
+  `next`/`prev` pages. This directly fixes cqlens's `LIMIT 100` dead end.
+- Statement-level `ConsistencyLevel`, `SERIAL` consistency, per-query timeout, `TRACING ON`
+  equivalent (`setTracing(true)` → render the full `system_traces.events` timeline — one of the
+  few places cqlsh currently beats every GUI).
+- Multi-statement scripts: execute all / statement-under-cursor / selection — split by a real CQL
+  lexer, not `split(";")` (string literals and UDF bodies contain semicolons).
+- `BATCH` builder (logged/unlogged/counter) with a partition-key warning when a batch spans
+  partitions.
+- LWT (`IF NOT EXISTS` / `IF <cond>`) with `[applied]` surfaced distinctly in the grid.
+- Async execution on virtual threads; every query cancellable from the UI.
+
+### 5.2 Token-range parallel unload (native engine)
+
+Our own implementation, used for interactive "export this table" and for streaming downloads.
+
+```
+1. tokenMap = session.getMetadata().getTokenMap()   // Optional<TokenMap>; must be enabled
+2. ranges   = tokenMap.getTokenRanges()
+3. splits   = ranges.flatMap(r -> r.splitEvenly(k)).flatMap(TokenRange::unwrap)
+                                                    // unwrap is REQUIRED: CQL cannot express
+                                                    // a wrapping range
+4. per split: SELECT <cols> FROM ks.tbl
+              WHERE token(pk) > ? AND token(pk) <= ?     // start-exclusive, end-inclusive
+              with .setRoutingToken(split.getEnd())      // routes to the owning replica
+5. work-stealing queue over an oversplit set; N virtual-thread consumers
+6. ordered/unordered merge → encoder → sink
+```
+
+Two non-obvious correctness/performance points, both worth calling out to implementers:
+
+- `splitEvenly(n)` splits by **token count, not data volume**. Under partition skew, equal-token
+  ranges take wildly unequal time. **Oversplit (target ~10k splits) and use a work-stealing
+  queue** rather than one-split-per-worker. This is the single biggest throughput lever.
+- `unwrap()` before querying, always. The wrapping range around the ring minimum will silently
+  return wrong results otherwise.
+
+Encoders: **CSV, JSON / JSONL, Parquet, XML, Excel (.xlsx)**. Excel and XML come from the NoSQL
+Manager parity list; Parquet is our addition and the right default for analytics handoff.
+Sinks: HTTP streaming download, mounted volume path, or S3.
+
+### 5.3 DSBulk-embedded engine (load, and very large unloads)
+
+Dependency: `com.datastax.oss:dsbulk-runner:1.11.1`.
+
+**Embedding contract.** DSBulk has no fluent programmatic API — the runner parses the same
+`String[]` you'd pass on the CLI and dispatches to a workflow. Two gotchas that will bite:
+
+1. **No `conf/` directory when embedded.** Either pass every setting as an argument or generate a
+   HOCON file and point `-f` at it. We generate a per-job HOCON file into the job's temp dir —
+   this also gives users a downloadable, reproducible artifact.
+2. **HOCON collision.** DSBulk's `application.conf` collides with Spring/Typesafe Config on the
+   same classpath. **Mitigation: run DSBulk in a separate JVM process** (`ProcessBuilder`) rather
+   than in-process. This also gives free job isolation, cancellation (kill the process), memory
+   capping, and immunity to DSBulk's `System.exit()` behavior. Parse the runner's exit status and
+   tail its log directory for progress. Ship the DSBulk distribution (zip/tar.gz — **not** the
+   executable jar, which upstream marks as evaluation-only) inside the Docker image.
+3. Workflows are discovered via **ServiceLoader**; verify `dsbulk-workflow-unload`,
+   `-load`, and `-count` are all present on the classpath in the shipped image.
+
+**Settings surface — expose as much as possible, per the user's directive.** The UI presents every
+DSBulk setting group, organized as progressive disclosure: a **Simple** tab (source/target, format,
+mapping) and an **Advanced** accordion covering all of `connector.csv`, `connector.json`, `schema`,
+`batch`, `codec`, `engine`, `executor`, `log`, `monitoring`, `driver`, `s3`, and `stats`. Every
+field renders its upstream default as placeholder text and links to the DSBulk settings docs.
+A **"View generated command"** pane shows the exact `dsbulk` invocation — copyable, so the UI
+doubles as a DSBulk command builder even for users who'll run it elsewhere.
+
+**Derived defaults (the important part).** Users should never *need* the advanced tab. At job
+creation, probe the cluster and derive:
+
+| Setting | Derivation |
+| --- | --- |
+| `executor.maxPerSecond` | unthrottled for self-managed; **respect server-side rate limiting on Astra** (DSBulk ≥1.9 detects and honors it — leave enabled) |
+| `executor.maxInFlight` / `engine.maxConcurrentQueries` | f(node count × cores, capped by client cores); start `nodes × 32` for unload |
+| `batch.mode` | `PARTITION_KEY` for load; `DISABLED` when the target has no clustering key |
+| `batch.maxBatchStatements` | 32; drop to 1 for counter tables |
+| `driver.basic.request.consistency` | `LOCAL_ONE` unload · `LOCAL_QUORUM` load (`LOCAL_ONE` for Keyspaces) |
+| `driver.advanced.protocol.compression` | `lz4` |
+| `connector.csv.maxConcurrentFiles` | = split count for unload |
+| `schema.splits` | `nodes × cores × 8`, oversplit per §5.2 |
+| `codec.*` | timestamp/date/time formats inferred from column types; `nullStrings` from a sniffed sample |
+
+Show every derived value in the UI as an editable, clearly-marked "auto" chip so the user sees
+*why* and can override. Persist overrides as reusable **job templates**.
+
+### 5.4 Count / statistics
+
+DSBulk `count` workflow: total rows, per-replica, per-token-range, and top-N largest partitions.
+This powers the Statistics tab (§4) and pre-flight estimates for export jobs.
+
+### 5.5 Job infrastructure
+
+All long-running work (unload, load, count, dump, copy, import) is a **Job**: persisted row,
+`QUEUED → RUNNING → SUCCEEDED|FAILED|CANCELLED`, progress via **SSE** (`/api/jobs/{id}/events`),
+cancellable, with retained logs and a downloadable artifact. Bounded executor, configurable
+concurrent-job cap. This is a shared substrate — build it before the engines that use it.
+
+---
+
+## 6. Vector, SAI & ANN (first-class, v1)
+
+Requires `java-driver-core` 4.16+ for `CqlVector` (which implements `Iterable` plus `List`-like
+methods) and 4.19.0 for correct vector handling in `describe`, Schema Builder, and QueryBuilder
+(JAVA-3118). **Also verify against CASSANDRA-19333** — a data-corruption bug in `VectorCodec`;
+add a round-trip fidelity test over a large float vector as a guard.
+
+**Schema:**
+- `vector<float, N>` as a first-class type in the column editor, with dimension input.
+- SAI index creation on vector columns with `similarity_function` selection
+  (`cosine` | `dot_product` | `euclidean`) and source-model options.
+- Full SAI lifecycle on scalar columns too: create/alter/drop/check, with the options surface
+  from the Astra SAI docs.
+
+**Query:**
+- **ANN query builder**: pick vector column → paste/upload a query vector or reference a row →
+  choose `LIMIT` → generates `SELECT … ORDER BY <col> ANN OF [...] LIMIT k`.
+- Hybrid queries: SAI predicates + ANN in one statement.
+- `similarity_cosine` / `similarity_dot_product` / `similarity_euclidean` projections shown as a
+  score column, sortable.
+
+**Display:**
+- Vectors render as a compact sparkline + dimension badge, not 1536 comma-separated floats.
+- Expandable inspector: full values, magnitude, and a similarity-to-selected-row comparison.
+- Export encodes vectors as JSON arrays (CSV/JSON) and as native list types (Parquet).
+
+---
+
+## 7. Data browsing & editing
+
+- **Virtualized grid** (TanStack Table + virtual) — 500-row pages, smooth over wide tables.
+- **Table view and Card view** (NoSQL Manager parity; card view is genuinely better for wide
+  Cassandra rows).
+- **Inline editing** → generates `UPDATE … WHERE <full primary key>`, previewed before execution.
+  Refuse to edit any result set that doesn't project the complete primary key, and say why.
+- **Row CRUD**: insert dialog (TTL + timestamp options), delete with preview, copy/paste rows.
+- **Generate INSERT / UPDATE / DELETE for selected rows** → into the editor or clipboard.
+- Type-aware renderers/editors: collections, UDTs, tuples, `blob` (hex/base64 toggle),
+  `timeuuid` (with decoded timestamp), `duration`, `inet`, counters, vectors.
+- Null vs. unset distinction made visible — this matters in Cassandra and every other GUI hides it.
+- Client-side result filter/sort/search (the whole set of gaps cqlens left open).
+
+### 7.1 Capability matrix
+
+A `ClusterCapabilities` probe at connect time (version + `system.local`/`system_schema` sniffing)
+drives feature gating, because the target list is genuinely heterogeneous:
+
+| Capability | C\* 3.11 | C\* 4.x | C\* 5.x | DSE 6.x | Astra | Keyspaces | Scylla |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| SAI | ✗ | ✗ | ✓ | ✓ (6.8+) | ✓ | ✗ | ✗ |
+| Vector / ANN | ✗ | ✗ | ✓ | ✗ | ✓ | ✗ | ✗ |
+| Materialized views | ✓(exp) | ✓(exp) | ✓ | ✓ | ✗ | ✗ | ✓ |
+| UDF / UDA | ✓ | ✓ | ✓ | ✓ | ✗ | ✗ | ✓ |
+| `TRUNCATE` | ✓ | ✓ | ✓ | ✓ | ✓ | ✗ | ✓ |
+| Token-range scan | ✓ | ✓ | ✓ | ✓ | ✓ | ✗ (no `token()` scan) | ✓ |
+| DSE Search | ✗ | ✗ | ✗ | ✓ | ✗ | ✗ | ✗ |
+| Roles/permissions | ✓ | ✓ | ✓ | ✓ | partial | IAM | ✓ |
+
+Unsupported features are **hidden with an explanatory tooltip**, never shown broken. Amazon
+Keyspaces in particular needs the bulk path to fall back from token-range scan to plain paging.
+
+---
+
+## 8. Advanced data operations (NoSQL Manager parity)
+
+- **CQL Dump** — backup a keyspace: schema DDL + data, to a single file or a directory tree.
+  Options: schema-only / data-only / both, per-table selection, compression, and a restore path
+  that replays the dump with progress. Built on §5.2.
+- **Copy keyspace between clusters** — streaming cluster→cluster with schema recreation, RF
+  remapping (source DC names rarely match target), and table selection. Never buffers to disk.
+- **Duplicate table** within or across keyspaces.
+- **Import from file** — CSV, JSON, Excel; column-mapping UI with type inference and a dry-run
+  preview of the first N rows before committing. Backed by DSBulk load.
+- **Import from external RDBMS** — MySQL and SQL Server (NoSQL Manager parity), via JDBC →
+  schema suggestion (proposing partition/clustering keys from the source PK) → DSBulk load.
+- **Export results** — CSV, JSON, XML, Excel from any grid; and full-table export via §5.2.
+- **Saved / favorite scripts**, persisted across sessions, with folders — plus full query history
+  with timing, and multi-tab editing.
+
+---
+
+## 9. Monetization: one-time Stripe payment
+
+Per the decision: **one paid tier, everything included, one-time payment, plus a bypass flag.**
+
+### 9.1 Enforcement model
+
+Offline **Ed25519-signed license key**. The app embeds only a *public* key, so a leaked build
+reveals nothing that can mint licenses, and the product works fully air-gapped — which matters
+because self-hosted Cassandra clusters are frequently in networks with no egress.
+
+```
+license payload (base64url, dot-separated from signature):
+{ "lic":"CSX-XXXX-XXXX-XXXX", "email":"…", "name":"…", "issued":"2026-08-17",
+  "edition":"standard", "seats":1, "ver":1 }
+```
+
+- `LicenseService.verify()` — signature check against `CASSYX_LICENSE_PUBLIC_KEY` (compile-time
+  constant, overridable for dev). No network call on the hot path.
+- Spring Security filter + `@RequiresLicense` annotation gate all `/api/**` except
+  `/api/health`, `/api/license/**`, and `/api/billing/**`.
+- Frontend: a `LicenseGate` provider; unlicensed state renders an activation/purchase screen.
+
+### 9.2 The bypass flag
+
+```yaml
+cassyx:
+  license:
+    enforce: ${CASSYX_LICENSE_ENFORCE:true}   # false ⇒ fully unlocked, no checks
+    key:     ${CASSYX_LICENSE_KEY:}
+```
+
+When `enforce=false`, `LicenseService` short-circuits to a synthetic valid license and the API
+returns `edition: "unlicensed-bypass"`. **The banner stays visible in the UI** so a bypassed
+instance is never mistaken for a paid one. Log a WARN at startup. This is the switch for
+development, CI, evaluation, and enterprise site-license deployments.
+
+### 9.3 Stripe integration (all placeholders, no live keys in repo)
+
+Following current Stripe guidance:
+
+- **Checkout Sessions API with `mode: "payment"`** — the recommended surface for one-time
+  payments. Not PaymentIntents (that's for off-session), never the Charges API.
+- **Instantiate `StripeClient`** and call methods on the instance. The global
+  `Stripe.apiKey = …` pattern is deprecated across all current SDKs.
+- **Never pass `payment_method_types`.** Omitting it enables dynamic payment methods, which is
+  both the recommendation and better for conversion. To restrict methods later, use
+  `payment_method_configurations` or `excluded_payment_method_types`.
+- Pass `integration_identifier` (label + 8 random letters) for Dashboard attribution.
+- Use a **restricted API key (`rk_`)** rather than a secret key.
+
+**Fulfillment is webhook-driven, not success-page-driven** — this is mandatory, not optional. A
+buyer can pay and lose connectivity before the return page loads; success-page fulfillment silently
+drops those orders.
+
+| Event | Action |
+| --- | --- |
+| `checkout.session.completed` | **only fulfill if `payment_status != "unpaid"`** |
+| `checkout.session.async_payment_succeeded` | fulfill (delayed-notification methods) |
+| `checkout.session.async_payment_failed` | mark failed, notify |
+
+Fulfillment = mint an Ed25519-signed license → persist → email it. Always **verify the webhook
+signature** (`Webhook.constructEvent`) before processing; make the handler idempotent on
+`event.id`.
+
+**Config — every value a placeholder:**
+
+```yaml
+cassyx:
+  billing:
+    enabled:          ${CASSYX_BILLING_ENABLED:false}
+    provider:         stripe
+    api-base-url:     ${CASSYX_BILLING_API_URL:https://api.stripe.com}
+    publishable-key:  ${STRIPE_PUBLISHABLE_KEY:pk_test_PLACEHOLDER}
+    secret-key:       ${STRIPE_SECRET_KEY:rk_test_PLACEHOLDER}
+    webhook-secret:   ${STRIPE_WEBHOOK_SECRET:whsec_PLACEHOLDER}
+    price-id:         ${STRIPE_PRICE_ID:price_PLACEHOLDER}
+    success-url:      ${CASSYX_SUCCESS_URL:http://localhost:8080/activate?session_id={CHECKOUT_SESSION_ID}}
+    cancel-url:       ${CASSYX_CANCEL_URL:http://localhost:8080/pricing}
+```
+
+**A `PaymentProvider` interface** abstracts the whole thing (`createCheckout`, `verifyWebhook`,
+`parseFulfillment`) with `StripePaymentProvider` and `NoopPaymentProvider` implementations, so the
+product can be resold through a different processor without touching license logic.
+
+Endpoints: `POST /api/billing/checkout-session`, `POST /api/billing/webhook` (CSRF-exempt, raw
+body preserved for signature verification), `POST /api/license/activate`, `GET /api/license`.
+
+> **Note on the licensing service.** Minting licenses requires the *private* key, which must not
+> ship in the self-hosted image. The webhook handler + key minter therefore run as a small
+> separate deployment (`licensing/` — same repo, own Dockerfile, own Stripe secrets) that you
+> operate. The distributed app only ever *verifies*. Sandbox setup for development:
+> `npm i -g @stripe/cli && stripe sandbox create` produces working test keys with no registration.
+
+### 9.4 Trial licenses
+
+Nobody buys a database tool they have not pointed at their own cluster. Without a trial the funnel
+is binary — locked or paid — and the bypass flag (§9.2) becomes the de-facto way everyone "buys".
+
+Trials reuse the §9.1 mechanism entirely. The payload is versioned via `ver` precisely so it can be
+extended without invalidating keys already in customers' hands, and **`expires` is that extension**:
+
+```
+{ "lic":"CSX-…", "email":"…", "name":"…", "issued":"2026-08-17",
+  "edition":"trial", "seats":1, "ver":1, "expires":"2026-09-01" }
+```
+
+Rules, all implemented in `cassyx-license`:
+
+- **Absent `expires` means perpetual.** Every key minted before trials existed keeps verifying
+  unchanged. This is the property that makes the extension safe.
+- **Expiry is inclusive.** `expires: 2026-09-01` is valid through the whole of 1 September. Buyers
+  read "expires on the 1st" as "works on the 1st"; an off-by-one here reads as the product cheating
+  them out of a day.
+- **Signature is verified before expiry**, never the reverse — `expires` is only trustworthy once we
+  know the payload was not edited. Checking expiry first would let anyone extend their own trial.
+- **An unparseable `expires` fails closed** (`MALFORMED`), never falling back to perpetual. A
+  malformed date silently upgrading a trial to a perpetual licence is the one direction this code
+  must never get wrong.
+- **UTC clock**, injected, so a licence does not lapse at a different instant depending on where the
+  container runs — and so expiry is testable at all.
+- Default trial length: **14 days** (`License.DEFAULT_TRIAL_DAYS`).
+
+`LicenseState` distinguishes `VALID · BYPASS · EXPIRED · ABSENT · MALFORMED · INVALID_SIGNATURE ·
+UPGRADE_REQUIRED`, because an expired trial deserves a purchase CTA while a bad signature deserves
+an error — collapsing both into `valid=false` throws away the only conversion moment the product
+gets. `LicenseStatus.invitesPurchase()` encodes which is which. An expired licence **retains** its
+payload so checkout can be pre-filled with the evaluator's name and email.
+
+`POST /api/license/trial` issues one. Minting needs the private key, so it proxies to the
+operator-run `licensing/` service and activates the result locally; it returns `503` with a pointer
+to `/api/license/activate` when there is no egress, and `409` rather than silently re-arming the
+clock when an email has already had a trial.
+
+### 9.5 Purchased version scope
+
+One-time pricing means upgrade revenue is the only revenue from existing customers, so a key is
+perpetual **for the major version it bought** and future majors are a paid upgrade. Encoded now,
+because retrofitting version scope onto keys already in customers' hands means either honouring them
+forever or breaking faith with your earliest buyers.
+
+`"scope": 1` — the purchased major. Semantics:
+
+- The licence covers that major **and every earlier one** (a v2 key runs v1 fine — scope is a
+  ceiling, not an equality check).
+- A newer major yields `UPGRADE_REQUIRED`, which invites purchase rather than erroring.
+- **Absent `scope` means unrestricted**, so pre-scoping keys keep working everywhere.
+- A stale key is a reason to withhold a **new release**, never to break a running install —
+  upgrading is the customer's choice, and a licence must never stop working on the version it was
+  sold for.
+
+Scope checking is opt-in at construction (`Ed25519LicenseVerifier.UNSCOPED` disables it), so the
+enforcement date is a deployment decision rather than a code change.
+
+---
+
+## 10. Build strategy — parallel subagent workstreams
+
+Per the user's directive to use subagents and maximize parallelism.
+
+### Phase 0 — sequential, blocking (one agent, must finish first)
+
+Everything else depends on these contracts, so they are deliberately *not* parallelized:
+
+1. `openapi/cassyx-api.yaml` — the complete API contract, per the normative rules in **§2.3**.
+   **This is the coordination artifact.** Backend agents implement it; the frontend agent generates
+   a typed client from it. Neither waits on the other.
+   **Exit criterion — Phase 1 does not start until this passes:**
+   `npx @redocly/cli lint openapi/cassyx-api.yaml` → **0 errors, 0 warnings**, every `$ref`
+   resolving. Everything else in Phase 0 may proceed in parallel with it, but no Phase 1
+   workstream begins against a red spec.
+2. Maven multi-module skeleton + Spring Boot bootstrap + H2 schema (Flyway).
+3. Vite/React skeleton + MUI theme + generated API client.
+4. `docker-compose.yml` with a Cassandra 5.x service (vector/SAI need 5.x) for integration tests.
+5. **Job substrate** (§5.5) — every long-running workstream builds on it.
+6. **`Makefile` + Docker Compose one-command stack** (§2.2) and the CI pipeline (§11.1). Built in
+   Phase 0 precisely so every parallel agent inherits `make test` and `make verify` from day one
+   and no agent invents its own harness.
+
+### Phase 1 — parallel workstreams (8 agents, independent)
+
+| # | Workstream | Owns | Key risk |
+| --- | --- | --- | --- |
+| A | Connections & sessions | §3 — registry, SCB upload, SSH, SSL, crypto | credential handling |
+| B | Schema catalog & DDL | §4 — metadata read, all object editors, describe | breadth; CASSJAVA-2 |
+| C | Query engine | §5.1 — paging, tracing, CQL lexer, batch, LWT | lexer correctness |
+| D | Native bulk engine | §5.2 — token-range scan, encoders, sinks | skew/work-stealing, `unwrap()` |
+| E | DSBulk integration | §5.3/5.4 — process runner, HOCON gen, full settings UI, defaults | classpath/HOCON isolation |
+| F | Vector / SAI / ANN | §6 — types, indexes, ANN builder, renderers | driver version pins |
+| G | Data grid & CRUD | §7 — virtualized grid, editors, statement generation | PK-completeness rule |
+| H | Licensing & Stripe | §9 — Ed25519, gate, provider abstraction, licensing svc | webhook idempotency |
+
+Then Phase 2 (integrating, 3 agents): migration tools (§8), capability matrix + compatibility
+testing across the target matrix (§7.1), and E2E/perf benchmarking.
+
+**Coordination rules for agents:**
+
+1. **The OpenAPI contract governs.** Follow §2.3 without exception. Contract first — change the
+   spec, then implement. The file is append-only during Phase 1; a breaking change requires an
+   explicit note to the orchestrator, who re-broadcasts it.
+2. **Run `npx @redocly/cli lint openapi/cassyx-api.yaml` before and after touching the spec.**
+   If you find it red, stop and report — do not build on a broken contract, and do not "fix" another
+   workstream's schemas without saying so.
+3. Each workstream owns disjoint packages and disjoint spec tags. Do not edit another's.
+4. Every agent ships integration tests against the shared Testcontainers Cassandra singleton.
+5. No agent edits `pom.xml` parent dependency versions without flagging it.
+6. Report honestly: paste real command output. A workstream reported green that is not green costs
+   more than one reported blocked.
+
+---
+
+## 11. Testing, CI & verification
+
+### 11.1 Coverage strategy and CI
+
+Efficient coverage means *targeted* coverage, not a uniform percentage. The gates differ by module
+because the risk differs by module:
+
+| Module | Line coverage gate | Rationale |
+| --- | --- | --- |
+| `cassyx-core` | 85% + mutation testing | correctness of paging/lexing is load-bearing |
+| `cassyx-bulk` | 85% + **completeness property tests** | silent data loss is the worst failure mode |
+| `cassyx-vector` | 80% | round-trip fidelity matters more than branch count |
+| `cassyx-license` | 90% | a bypass bug is a revenue bug |
+| `cassyx-migrate` | 75% | |
+| `cassyx-api` | 60% | thin adapters; covered by integration + E2E instead |
+| frontend | 70% statements | logic/hooks tested; presentational components via E2E |
+
+Enforced by JaCoCo (`check` bound to `verify`, build fails under threshold) and vitest `--coverage`.
+**PIT mutation testing** runs on `cassyx-core` and `cassyx-bulk` only — where line coverage most
+easily lies about real assurance — with a 70% mutation-score gate.
+
+Test pyramid, deliberately weighted: many fast unit tests (no containers, no network); one **shared
+Testcontainers Cassandra 5.x singleton reused across the whole integration suite** (starting a
+container per class is the usual reason Cassandra test suites become unusably slow); a thin E2E
+layer covering only true user journeys.
+
+CI (GitHub Actions), all jobs parallel where possible:
+
+```
+contract      → redocly lint (0 errors, 0 warnings) · all $refs resolve · gen:api produces
+                clean TypeScript · live backend responses validated against the schema (drift check)
+lint          → spotless/checkstyle · eslint · tsc --noEmit
+arch          → ArchUnit: no Spring below cassyx-api, no cross-module impl imports (§2.1)
+unit          → mvn test (matrix: Java 21) · vitest
+integration   → mvn verify (Testcontainers Cassandra 5.x)
+mutation      → PIT on core + bulk (nightly, not per-PR — too slow)
+e2e           → make e2e (Playwright, trace + video retained on failure)
+security      → OWASP Dependency-Check (CVE pins from §2) · gitleaks · npm audit
+compat        → nightly matrix vs C* 3.11 / 4.1 / 5.0 / DSE 6.8 / Scylla (§11.3)
+bench         → nightly, results committed to a trend file so regressions are visible
+```
+
+`make verify` runs the per-PR subset locally and is identical to what CI runs — no "works on my
+machine" gap. Branch protection requires contract, lint, arch, unit, integration, e2e, and security.
+The `contract` job runs **first and fast** — it is the cheapest signal that eight parallel
+workstreams are still building against the same agreed API.
+
+### 11.2 Test detail
+
+**Unit / integration** — Testcontainers with Cassandra 5.x (vector + SAI available). Per
+workstream: session lifecycle & SCB round-trip; DDL generate→execute→describe→compare for every
+object type; paging across a 100k-row table with correct prev/next; token-range scan **completeness
+assertion** (union of splits = full row count, no dupes, no gaps — the critical correctness test
+for §5.2); vector round-trip fidelity at 1536 dims (CASSANDRA-19333 guard); license
+sign/verify/tamper-detect; Stripe webhook signature verification with fixture payloads.
+
+**End-to-end (Playwright)** — connect → browse schema → run query → page → edit a cell → export
+CSV → run an unload job to completion → activate a license.
+
+**Performance benchmarks (must be recorded, not assumed):**
+- Unload 10M rows → CSV. Target: within 1.5× of native DSBulk CLI on the same hardware. Compare
+  our native engine (§5.2) vs. embedded DSBulk (§5.3) and **document which wins at which scale** —
+  this decides the default routing between the two engines.
+- Grid first-paint on a 1000-column-wide table < 1s.
+- Memory ceiling under a 50M-row unload — must stream, never buffer.
+
+### 11.3 Compatibility
+
+**Compatibility** — a smoke suite run against Cassandra 3.11, 4.1, 5.0, DSE 6.8, an Astra free-tier
+DB, and ScyllaDB, asserting the §7.1 capability matrix gates correctly rather than erroring.
+
+**Manual Astra check** — real SCB upload, connect, browse, ANN query on a vector table, unload.
+
+---
+
+## 12. Open items to confirm during build
+
+1. **Auth model.** The plan assumes a single-user self-hosted instance. If multiple people will
+   share one deployment, we need user accounts + per-user connection isolation — a meaningful
+   addition. cqlens had a single global session; we should decide deliberately rather than inherit.
+2. **DSBulk CVE pins** must be resolved before any public release (§2).
+3. **Native vs. embedded engine routing** — the §11 benchmark decides this; until then, both ship.
+4. Amazon Keyspaces lacks `token()` range scans — confirm the paging fallback is acceptable there.
