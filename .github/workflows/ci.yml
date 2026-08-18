@@ -156,9 +156,13 @@ jobs:
         run: docker pull cassandra:5.0
       - name: make e2e
         run: make e2e
+      # NOT `make logs`: that target is `docker compose logs -f`, which follows the stream
+      # forever. In CI it never returns, so the job burns to its 45-minute timeout and the
+      # real Playwright failure is buried under a hung diagnostic step.
       - name: Stack logs on failure
         if: failure()
-        run: make logs || docker compose logs --tail=200 || true
+        timeout-minutes: 2
+        run: docker compose logs --tail=200 || true
       - name: Upload Playwright report (trace + video retained on failure)
         if: always()
         uses: actions/upload-artifact@v4
