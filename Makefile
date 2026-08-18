@@ -27,7 +27,11 @@ COMPOSE     := docker compose -f $(ROOT)/docker-compose.yml
 DC_APP      := $(COMPOSE) --profile app
 DC_DEV      := $(COMPOSE) --profile dev
 DC_TOOLS    := $(COMPOSE) --profile tools
-DC_E2E      := $(COMPOSE) --profile e2e
+# The e2e service depends_on frontend, which lives in the `app` profile. Activating only
+# the `e2e` profile leaves frontend undefined and compose rejects the whole project with
+# "service \"e2e\" depends on undefined service \"frontend\": invalid compose project".
+# Both profiles must be active for the projection to be valid.
+DC_E2E      := $(COMPOSE) --profile app --profile e2e
 PREFLIGHT   := bash $(ROOT)/scripts/preflight.sh
 WAIT        := bash $(ROOT)/scripts/wait-for-health.sh
 
@@ -47,9 +51,9 @@ DIM  := \033[2m
 OFF  := \033[0m
 say   = @printf "$(CYAN)▸$(OFF) $(BOLD)%s$(OFF)\n" "$(1)"
 
-.PHONY: help up down dev test e2e e2e-ui bench verify seed smoke \
+.PHONY: help up down dev test e2e e2e-ui bench verify seed smoke lint-workflows lint-sources \
         db cql logs ps config show-contracts clean nuke restart open \
-        contract lint arch unit integration security mutation compat \
+        contract lint arch unit integration security secrets deps-audit cve-scan mutation compat \
         lint-backend lint-frontend unit-backend unit-frontend \
         build-images check-backend check-frontend check-e2e \
         check-backend-src check-frontend-src
@@ -157,7 +161,20 @@ contract: ## API contract gate — redocly lint (0 errors/0 warnings) · $$refs 
 	$(call say,API contract gate — openapi/cassyx-api.yaml (§2.3))
 	@bash $(ROOT)/scripts/check-openapi.sh
 
-lint: lint-backend lint-frontend ## spotless/checkstyle · eslint · tsc --noEmit
+lint: lint-workflows lint-sources lint-backend lint-frontend ## actionlint · spotless/checkstyle · eslint · tsc --noEmit
+
+lint-sources: ## Guard: no source file silently excluded by .gitignore
+	$(call say,tracked-sources guard)
+	@bash $(ROOT)/scripts/check-tracked-sources.sh
+
+lint-workflows: ## Validate GitHub Actions workflows (actionlint)
+	$(call say,actionlint — GitHub Actions workflow validation)
+	@# An invalid workflow file does not fail loudly: every job dies at startup in 0s with
+	@# only "This run likely failed because of a workflow file issue", so CI silently stops
+	@# running while looking like it ran. That is exactly how a `secrets` context in a
+	@# step-level `if:` shipped to main unnoticed. actionlint names the line and the reason.
+	@docker run --rm -v "$(ROOT):/repo" -w /repo rhysd/actionlint:latest || \
+	  (printf "\033[31m✗ workflow validation failed — CI will not run at all until this is fixed.\033[0m\n"; exit 1)
 
 lint-backend: check-backend-src
 	$(call say,spotless:check + checkstyle)
@@ -172,22 +189,44 @@ mutation: check-backend-src ## PIT mutation testing on cassyx-core + cassyx-bulk
 	@$(DC_TOOLS) run --rm --no-deps maven -B -ntp -pl cassyx-core,cassyx-bulk \
 	    org.pitest:pitest-maven:mutationCoverage
 
-security: ## OWASP Dependency-Check · gitleaks · npm audit
+# -----------------------------------------------------------------------------
+# Security, split by CADENCE rather than lumped together.
+#
+# gitleaks and npm audit are commit-sensitive and fast: a secret introduced by a
+# commit must be caught before it merges. OWASP Dependency-Check is neither. It
+# compares the dependency tree against the NVD feed, so between two commits that
+# do not touch pom.xml or package-lock.json the only thing that can change the
+# verdict is NVD itself. Running it per-commit added ~20 minutes to every PR to
+# re-ask a question whose answer cannot have changed — and gave WORSE coverage
+# than a schedule, since a quiet week means no scan at all.
+#
+# Cadence: secrets + deps-audit every commit; cve-scan weekly and whenever a
+# dependency manifest changes (.github/workflows/cve-scan.yml).
+# -----------------------------------------------------------------------------
+security: secrets deps-audit ## Per-commit security: gitleaks + npm audit (see cve-scan for CVEs)
+
+secrets: ## gitleaks secret scan (fast, every commit)
 	$(call say,gitleaks (secret scan))
 	@docker run --rm -v "$(ROOT):/repo:ro" zricethezav/gitleaks:latest \
 	    detect --source=/repo --no-git --redact --config=/repo/.gitleaks.toml || \
 	    (printf "\033[31mgitleaks found candidate secrets — do not push.\033[0m\n"; exit 1)
+
+deps-audit: ## npm audit (fast, every commit; no NVD dependency)
+	@if [ -f "$(ROOT)/frontend/package.json" ]; then \
+	   printf "$(CYAN)▸$(OFF) npm audit\n"; \
+	   $(NPM) "npm ci --no-audit --no-fund || npm install --no-audit --no-fund; npm audit --audit-level=high" || exit 1; \
+	 else printf "\033[33m! frontend/ absent — npm audit skipped\033[0m\n"; fi
+
+cve-scan: ## OWASP Dependency-Check (weekly + on dependency changes; NOT per commit)
 	@if [ -f "$(ROOT)/backend/pom.xml" ]; then \
 	   printf "$(CYAN)▸$(OFF) OWASP Dependency-Check (CVE-2026-24400 / CVE-2023-6378 pins, §2)\n"; \
 	   if [ -z "$${NVD_API_KEY:-}" ]; then \
 	     printf "\033[33m!\033[0m NVD_API_KEY is not set — SKIPPING OWASP Dependency-Check.\n"; \
 	     printf "  Without a key the NVD API rejects the update outright:\n"; \
 	     printf "    NvdApiException: Invalid API Key, length of 0 too short\n"; \
-	     printf "  Running it anyway would fail every build while producing no security signal,\n"; \
-	     printf "  so it is skipped. gitleaks and npm audit below still run.\n"; \
 	     printf "  Get a free key (~1 min): https://nvd.nist.gov/developers/request-an-api-key\n"; \
 	     printf "    local: export NVD_API_KEY=...\n"; \
-	     printf "    CI:    add it as the NVD_API_KEY repo secret (Settings > Secrets > Actions)\n"; \
+	     printf "    CI:    NVD_API_KEY repo secret (Settings > Secrets > Actions)\n"; \
 	     if [ -n "$${SECURITY_STRICT:-}" ]; then \
 	       printf "\033[31mSECURITY_STRICT is set — refusing to skip. Provide NVD_API_KEY.\033[0m\n"; exit 1; \
 	     fi; \
@@ -197,10 +236,6 @@ security: ## OWASP Dependency-Check · gitleaks · npm audit
 	       -DnvdApiKey=$$NVD_API_KEY || exit 1; \
 	   fi; \
 	 else printf "\033[33m! backend/ absent — OWASP Dependency-Check skipped\033[0m\n"; fi
-	@if [ -f "$(ROOT)/frontend/package.json" ]; then \
-	   printf "$(CYAN)▸$(OFF) npm audit\n"; \
-	   $(NPM) "npm ci --no-audit --no-fund || npm install --no-audit --no-fund; npm audit --audit-level=high" || exit 1; \
-	 else printf "\033[33m! frontend/ absent — npm audit skipped\033[0m\n"; fi
 
 compat: ## Nightly compatibility smoke across the §7.1 target matrix
 	$(call say,compatibility matrix — run one target at a time via CASSANDRA_IMAGE)
@@ -239,7 +274,7 @@ bench: ## The §11.2 performance benchmarks; appends to bench/trend.csv
 # The pre-push gate — IDENTICAL to the per-PR CI job set (§11.1).
 # CI invokes exactly these targets, so local and CI cannot drift.
 # =============================================================================
-verify: ## Everything CI runs per PR: contract · lint · arch · unit · integration · e2e · security
+verify: ## Everything CI runs per PR: contract · lint · arch · unit · integration · smoke · e2e · secrets · deps-audit
 	@$(MAKE) --no-print-directory contract
 	@$(MAKE) --no-print-directory lint
 	@$(MAKE) --no-print-directory arch
@@ -248,7 +283,8 @@ verify: ## Everything CI runs per PR: contract · lint · arch · unit · integr
 	@$(MAKE) --no-print-directory integration
 	@$(MAKE) --no-print-directory smoke
 	@$(MAKE) --no-print-directory e2e
-	@$(MAKE) --no-print-directory security
+	@$(MAKE) --no-print-directory secrets
+	@$(MAKE) --no-print-directory deps-audit
 	@printf "\n\033[32m✓ verify passed — same job set branch protection requires.\033[0m\n\n"
 
 # =============================================================================
