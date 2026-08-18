@@ -27,7 +27,11 @@ COMPOSE     := docker compose -f $(ROOT)/docker-compose.yml
 DC_APP      := $(COMPOSE) --profile app
 DC_DEV      := $(COMPOSE) --profile dev
 DC_TOOLS    := $(COMPOSE) --profile tools
-DC_E2E      := $(COMPOSE) --profile e2e
+# The e2e service depends_on frontend, which lives in the `app` profile. Activating only
+# the `e2e` profile leaves frontend undefined and compose rejects the whole project with
+# "service \"e2e\" depends on undefined service \"frontend\": invalid compose project".
+# Both profiles must be active for the projection to be valid.
+DC_E2E      := $(COMPOSE) --profile app --profile e2e
 PREFLIGHT   := bash $(ROOT)/scripts/preflight.sh
 WAIT        := bash $(ROOT)/scripts/wait-for-health.sh
 

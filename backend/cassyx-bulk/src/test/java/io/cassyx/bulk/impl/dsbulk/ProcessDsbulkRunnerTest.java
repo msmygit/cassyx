@@ -166,7 +166,21 @@ class ProcessDsbulkRunnerTest {
     ProcessDsbulkRunner runner = new ProcessDsbulkRunner(
         distribution(), "512m", Duration.ofMillis(500),
         builder -> {
-          builder.command(List.of("sh", "-c", "echo started >&2; sleep 60"));
+          // `exec` matters. Without it, dash (this image's /bin/sh) forks `sleep` as a CHILD
+          // and does not replace itself - verified: `ps --ppid <sh>` shows `sleep 60`, and after
+          // SIGTERM to sh the sleep SURVIVES. That orphan keeps the inherited stderr pipe open,
+          // so run()'s `reader.readLine()` never sees EOF and never returns.
+          //
+          // Worse, it made the test nondeterministic: cancel() polls immediately, so whether an
+          // orphan exists depends on whether dash had reached the fork yet. It passed locally in
+          // ~1s (cancel won the race) and failed in CI at the 20s join (fork won). `exec` removes
+          // the race entirely - sh becomes the sleep, so there is exactly one process to kill.
+          //
+          // The orphan scenario is a REAL product concern for `bin/dsbulk`, which is a shell
+          // script wrapping a JVM. It is tracked separately in docs/integration-todo.md
+          // ("Process-tree cancellation") because fixing it needs process-group handling and its
+          // own test - not a fixture tweak smuggled into a CI fix.
+          builder.command(List.of("sh", "-c", "echo started >&2; exec sleep 60"));
           Process process = builder.start();
           started.countDown();
           return process;
