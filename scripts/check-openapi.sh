@@ -172,8 +172,12 @@ if curl -fsS --max-time 3 "$DRIFT_BASE_URL/api/health" >/dev/null 2>&1; then
     set -e
     npx --yes @redocly/cli@latest bundle '$SPEC_REL' -o /tmp/spec.json >/dev/null
     mkdir -p /tmp/drift && cd /tmp/drift
-    npm i --no-save --no-audit --no-fund --silent ajv@8 ajv-formats@3 >/dev/null 2>&1
-    NODE_PATH=/tmp/drift/node_modules node /repo/scripts/openapi-drift.mjs /tmp/spec.json '$DRIFT_BASE_URL'
+    npm i --no-save --no-audit --no-fund --silent ajv@8 ajv-formats@3
+    # Run the script FROM /tmp/drift rather than pointing NODE_PATH at it: NODE_PATH is
+    # honoured only by CommonJS require(), never by ESM import, so the previous form
+    # installed ajv and then failed to resolve it.
+    cp /repo/scripts/openapi-drift.mjs /tmp/drift/openapi-drift.mjs
+    node /tmp/drift/openapi-drift.mjs /tmp/spec.json '$DRIFT_BASE_URL'
   " && ok "live responses match the schema" || bad "live responses drift from the schema"
 else
   skip "backend not reachable at $DRIFT_BASE_URL — drift check inactive (run 'make up' first)"

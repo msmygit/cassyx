@@ -70,7 +70,12 @@ for (const [path, item] of Object.entries(spec.paths ?? {})) {
   }
   if (res.status !== 200) { results.skipped++; continue; }
 
-  const validate = ajv.compile(schema);
+  // Response schemas are almost always `$ref: '#/components/schemas/X'`, and those
+  // pointers are relative to the DOCUMENT root. Compiling the bare sub-schema gives ajv
+  // no root to resolve against, so every ref-bearing response fails with
+  // "can't resolve reference #/components/schemas/... from id #". Carrying `components`
+  // into the compiled root makes the same pointers resolve.
+  const validate = ajv.compile({ ...schema, components: spec.components });
   results.checked++;
   if (!validate(body)) {
     results.failed++;
