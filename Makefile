@@ -47,7 +47,7 @@ DIM  := \033[2m
 OFF  := \033[0m
 say   = @printf "$(CYAN)▸$(OFF) $(BOLD)%s$(OFF)\n" "$(1)"
 
-.PHONY: help up down dev test e2e e2e-ui bench verify seed smoke lint-workflows \
+.PHONY: help up down dev test e2e e2e-ui bench verify seed smoke lint-workflows lint-sources \
         db cql logs ps config show-contracts clean nuke restart open \
         contract lint arch unit integration security mutation compat \
         lint-backend lint-frontend unit-backend unit-frontend \
@@ -157,7 +157,11 @@ contract: ## API contract gate — redocly lint (0 errors/0 warnings) · $$refs 
 	$(call say,API contract gate — openapi/cassyx-api.yaml (§2.3))
 	@bash $(ROOT)/scripts/check-openapi.sh
 
-lint: lint-workflows lint-backend lint-frontend ## actionlint · spotless/checkstyle · eslint · tsc --noEmit
+lint: lint-workflows lint-sources lint-backend lint-frontend ## actionlint · spotless/checkstyle · eslint · tsc --noEmit
+
+lint-sources: ## Guard: no source file silently excluded by .gitignore
+	$(call say,tracked-sources guard)
+	@bash $(ROOT)/scripts/check-tracked-sources.sh
 
 lint-workflows: ## Validate GitHub Actions workflows (actionlint)
 	$(call say,actionlint — GitHub Actions workflow validation)

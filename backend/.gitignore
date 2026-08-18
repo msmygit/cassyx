@@ -1,3 +1,11 @@
+# Build output. Unanchored on purpose: every module has its own target/.
 target/
-data/
+
+# H2 store (CASSYX_DATA_DIR). ANCHORED with a leading slash so it matches only
+# backend/data/ and NOT any directory named "data" at any depth — the unanchored
+# form silently excluded the Java source package io/cassyx/api/data/, so
+# DataController.java and DataDtos.java were never committed and CI failed with
+# "package io.cassyx.api.data does not exist" while local builds passed.
+/data/
+
 *.log
