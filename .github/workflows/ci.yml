@@ -178,39 +178,24 @@ jobs:
         run: make down || true
 
   # ---------------------------------------------------------------------------
+  # Per-commit security only: gitleaks and npm audit are commit-sensitive and fast.
+  # OWASP Dependency-Check moved to .github/workflows/cve-scan.yml (weekly + on
+  # dependency-manifest changes) — its verdict depends on the NVD feed, not on your
+  # commits, so running it per-PR added ~20 minutes to re-ask an unchanged question
+  # while giving worse coverage than a schedule during quiet periods.
   security:
-    name: security (OWASP DC · gitleaks · npm audit)
+    name: security (gitleaks · npm audit)
     runs-on: ubuntu-latest
-    timeout-minutes: 40
-    # Hoisted to job level so the steps below can branch on it. The `secrets` context is
-    # NOT available in a step-level `if:` — using it there is not merely ignored, it makes
-    # the whole workflow file invalid, so every job fails at startup in 0s with only
-    # "This run likely failed because of a workflow file issue". `env` IS available in `if`.
-    env:
-      NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0   # gitleaks history scan
       - run: cp .env.example .env
-      - name: Warn when NVD_API_KEY is absent
-        if: env.NVD_API_KEY == ''
-        run: |
-          echo "::warning title=OWASP Dependency-Check skipped::NVD_API_KEY repo secret is not set, so CVE scanning is SKIPPED (gitleaks and npm audit still run). The NVD API rejects keyless clients outright ('Invalid API Key, length of 0 too short'), so running it would fail the build without producing any security signal. Get a free key at https://nvd.nist.gov/developers/request-an-api-key and add it under Settings > Secrets and variables > Actions as NVD_API_KEY."
-      # NVD_API_KEY comes from the job-level env above. When absent, `make security` skips
-      # Dependency-Check with a warning rather than failing the build — a missing credential is a
-      # configuration gap, not a vulnerability finding. Release builds set SECURITY_STRICT=1 to
-      # turn that skip back into a hard failure.
-      - name: make security
-        run: make security
-      - name: Upload dependency-check report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: dependency-check-report
-          path: backend/**/target/dependency-check-report.*
-          if-no-files-found: ignore
-          retention-days: 14
+      - name: make secrets
+        run: make secrets
+      - name: make deps-audit
+        run: make deps-audit
 
   # ---------------------------------------------------------------------------
   # Guard against the one failure mode this pipeline exists to prevent:
