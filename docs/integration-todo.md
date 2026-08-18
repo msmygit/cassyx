@@ -60,3 +60,26 @@ Verified against upstream DSBulk `settings.md`, not assumed:
   minting service (private key must never ship in the self-hosted image), transactional email.
 - **Migration tools** (§8), compat matrix (§7.1), and the perf benchmark that decides
   native-vs-DSBulk routing (§11.2).
+
+## Process-tree cancellation (open, needs its own PR + test)
+
+`ProcessDsbulkRunner.terminate()` calls `process.destroy()` / `destroyForcibly()`, which signal
+only the direct child. `$DSBULK_HOME/bin/dsbulk` is a **shell script that launches a JVM**, so
+cancelling plausibly kills the wrapper and leaves the JVM running against the cluster while the UI
+reports the job cancelled.
+
+**Status: unconfirmed, and the obvious fix does not work.** Snapshotting `process.descendants()`
+before signalling and destroying them alongside the parent makes
+`ProcessDsbulkRunnerTest.cancelKillsTheChild` hang: `run()` never returns and the worker thread is
+still alive after a 20s join. Reverted — 10/10 pass in ~1.1s without it, 0/5 with it. The cause is
+not yet understood, so the change must not be reapplied without diagnosing that first.
+
+To do properly, in its own PR:
+1. Determine empirically whether a real `bin/dsbulk` JVM survives a cancel (the current test uses
+   `sh -c "echo …; sleep 60"`, which may not reproduce the real process shape).
+2. If it survives, fix it *and* explain why the descendants approach deadlocks — most likely
+   an interaction with how `run()` drains the child's stdout/stderr.
+3. Add a test asserting no descendant survives cancellation, not just that the parent died.
+
+Related: the `JobService` → `DsbulkJobService` cancel delegation above. Both must be fixed for
+`POST /api/jobs/{id}/cancel` to be truthful.
