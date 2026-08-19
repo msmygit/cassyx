@@ -40,11 +40,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: cp .env.example .env
       - name: make mutation
         run: make mutation
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: pit-reports
@@ -68,11 +68,11 @@ jobs:
           # DSE 6.8 requires a licensed image + registry credentials:
           # - { label: "DSE 6.8",  image: "datastax/dse-server:6.8.44" }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: cp .env.example .env
       - name: Probe the §7.1 capability matrix
         run: bash scripts/compat.sh "${{ matrix.target.image }}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: compat-${{ matrix.target.label }}
@@ -87,7 +87,7 @@ jobs:
     permissions:
       contents: write   # commits the trend row
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: cp .env.example .env
       - name: Pre-pull Cassandra 5.x
         run: docker pull cassandra:5.0
@@ -108,7 +108,7 @@ jobs:
           git add bench/trend.csv
           git commit -m "bench: nightly results $(date -u +%Y-%m-%d) [skip ci]"
           git push
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: bench-trend

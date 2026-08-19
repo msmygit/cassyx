@@ -52,3 +52,12 @@ bench/compat-results.txt
 !.vscode/extensions.json
 .DS_Store
 Thumbs.db
+
+# Agent worktrees are created inside the repo by the Claude Code Agent tool. They are full
+# checkouts, so without this an untracked-file sweep or a `git add -A` commits an entire second
+# copy of the tree.
+/.claude/
+
+# OWASP Dependency-Check NVD database. Lives here (rather than in the maven-repo volume) so CI
+# can cache it; see `make cve-scan`. Hundreds of MB, never committed.
+/backend/.dependency-check-data/

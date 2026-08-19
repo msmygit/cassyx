@@ -67,7 +67,7 @@ RUN apt-get update \
 #
 # GitHub releases rather than downloads.datastax.com: the latter publishes only 1.11.0, while the
 # pinned 1.11.1 (and 1.11.2) exist only as release assets.
-ARG DSBULK_VERSION=1.11.1
+ARG DSBULK_VERSION=1.11.2
 ENV DSBULK_HOME=/opt/dsbulk
 RUN set -eux; \
     curl -fsSL -o /tmp/dsbulk.tar.gz \

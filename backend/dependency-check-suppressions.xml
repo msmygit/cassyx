@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  OWASP Dependency-Check suppressions for the cassyx reactor (plan section 11.1, `make cve-scan`).
+
+  RULES FOR THIS FILE - read before adding anything:
+  1. A suppression is only ever for a match that is WRONG (Dependency-Check pairs our jar with a
+     CPE belonging to some other product). "Hard to upgrade" is not a reason; if a real finding
+     cannot be fixed, leave the build red and escalate it.
+  2. Every entry states the CVE, why it does not apply to us, and the evidence it was checked
+     against - not "believed to be a false positive".
+  3. No blanket <cve> without a <packageUrl>: a suppression must not silently cover a future
+     dependency that really is affected.
+-->
+<suppressions xmlns="https://jeremylong.github.io/DependencyCheck/dependency-suppression.1.3.xsd">
+
+  <!--
+    CVE-2023-37475 against org.apache.parquet:parquet-avro.
+
+    Not applicable: the CVE is against hamba/avro, the GO implementation of the Avro codec
+    (github.com/hamba/avro/v2). Its CPE is
+      cpe:2.3:a:avro_project:avro:*:*:*:*:*:go:*:*
+    - note the `go` target-software field - and the advisory's fix is a Go commit released as
+    hamba/avro v2.13.0 (OSV GHSA-9x44-9pgq-cf45 / CVE-2023-37475; the affected range is a GIT range
+    on https://github.com/hamba/avro). It has nothing to do with Apache Parquet or with the Java
+    Apache Avro library.
+
+    Dependency-Check matches it only because the artefact is called "*-avro" and the version number
+    of the Parquet release happens to fall inside the Go package's "all versions before 2.13.0"
+    range. Parquet's version line and Avro's are unrelated: parquet-avro 1.15.1 embeds Apache Avro
+    (Java) 1.11.x, not "Avro 1.15.1", which has never existed.
+
+    Evidence: OSV lookup of parquet-avro at 1.15.1, 1.15.2, 1.16.0, 1.17.1 and 1.18.0 reports
+    CVE-2025-46762 (fixed by the upgrade to 1.18.0) and nothing else - CVE-2023-37475 is not
+    associated with the Maven artefact at any version.
+
+    Scoped to parquet-avro by packageUrl so that a genuinely affected dependency added later is
+    still reported.
+  -->
+  <suppress>
+    <notes><![CDATA[
+      CVE-2023-37475 is a DoS in hamba/avro (Go). CPE target-software is `go`; the fix is
+      hamba/avro v2.13.0. Not reachable from a Java Parquet dependency.
+    ]]></notes>
+    <packageUrl regex="true">^pkg:maven/org\.apache\.parquet/parquet-avro@.*$</packageUrl>
+    <cve>CVE-2023-37475</cve>
+  </suppress>
+
+  <!--
+    CVE-2026-66299 against org.apache.tomcat.embed:tomcat-embed-core.
+
+    Not applicable: the vulnerability is uncontrolled resource consumption in Tomcat's WebSocket
+    CHAT EXAMPLE, which lives in the `examples` web application. NVD's own description says so
+    outright, and adds: "Users who have followed the security guidance to remove the examples web
+    application are not affected by this issue."
+
+    The examples webapp ships only in the full Tomcat distribution (apache-tomcat-*.tar.gz). It is
+    not in the embedded jar, which is the only Tomcat artefact cassyx ships. Verified by listing
+    the jar: zero entries match `examples` or `chat`, and the only top-level packages are
+    jakarta/servlet, jakarta/security and org/apache. There is no code path to the vulnerable
+    component because the component is not present.
+
+    This is a component-not-present suppression, NOT a risk acceptance. The version pin is already
+    as high as it can go: every other Tomcat finding was cleared by moving to 10.1.57, and this one
+    is fixed in 10.1.58, which Apache had not released to Maven Central at the time of writing.
+    When 10.1.58 lands, raise <tomcat.version> and DELETE this entry rather than leaving it to rot.
+
+    Scoped to tomcat-embed-core by packageUrl, so a full Tomcat distribution added later - which
+    WOULD carry the examples webapp - is still reported.
+  -->
+  <suppress>
+    <notes><![CDATA[
+      CVE-2026-66299 is a DoS in Tomcat's WebSocket chat EXAMPLE. The examples webapp is not
+      present in tomcat-embed-core (verified by jar listing), only in the full distribution.
+      Fixed upstream in 10.1.58; remove this entry when that version is available.
+    ]]></notes>
+    <packageUrl regex="true">^pkg:maven/org\.apache\.tomcat\.embed/tomcat-embed-core@.*$</packageUrl>
+    <cve>CVE-2026-66299</cve>
+  </suppress>
+
+</suppressions>

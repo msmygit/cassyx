@@ -217,6 +217,37 @@ deps-audit: ## npm audit (fast, every commit; no NVD dependency)
 	   $(NPM) "npm ci --no-audit --no-fund || npm install --no-audit --no-fund; npm audit --audit-level=high" || exit 1; \
 	 else printf "\033[33m! frontend/ absent — npm audit skipped\033[0m\n"; fi
 
+# Two things here are deliberate and were each learned the hard way.
+#
+# 1. The install pass. dependency-check is invoked as a STANDALONE goal, so Maven runs no
+#    lifecycle phase and never installs the reactor's own modules. cassyx-bulk depends on
+#    io.cassyx:cassyx-core:0.1.0-SNAPSHOT, which is then absent from the local repository:
+#      Could not find artifact io.cassyx:cassyx-core:jar:0.1.0-SNAPSHOT
+#    Latent from the start; it only surfaced once the jackson finding was cleared, because until
+#    then the reactor always died on cassyx-core and never reached cassyx-bulk. Tests, spotless
+#    and checkstyle are skipped in that pass: ci.yml already runs all three per commit, and this
+#    target's job is CVE resolution, not re-verifying the build.
+#
+# 2. aggregate, not check. `check` runs a full analysis once PER MODULE - seven passes over what
+#    is very nearly the same dependency graph - which took the CI job past its 60 minute timeout
+#    without ever reaching a verdict. `aggregate` analyses the whole reactor in one pass and
+#    reports the same findings.
+#
+# 3. NVD retry settings. The NVD API returns 503 under load often enough that an unretried run
+#    is a coin flip, and the failure is indistinguishable at a glance from a real finding:
+#      UpdateException: Error updating the NVD Data
+#        caused by NvdApiException: NVD Returned Status Code: 503
+#    nvdApiDelay spaces the requests out to avoid provoking it in the first place.
+#
+# 4. dataDirectory inside /workspace. This is what makes the CI cache work at all, and its
+#    absence was invisible for a long time. Maven runs INSIDE a container whose /root/.m2 is the
+#    `maven-repo` NAMED VOLUME, so Dependency-Check's default data directory
+#    (~/.m2/repository/org/owasp/dependency-check-data) resolved inside that volume - not on the
+#    runner's filesystem. actions/cache was pointed at the runner path, which never existed, so
+#    the save step reported success while storing nothing and every run re-downloaded the whole
+#    ~380k record NVD dataset from cold. /workspace is the ./backend bind mount, so putting the
+#    database there lands it on the runner where the cache can actually see it.
+#    Keep this in sync with the cache path in .github/workflows/cve-scan.yml.
 cve-scan: ## OWASP Dependency-Check (weekly + on dependency changes; NOT per commit)
 	@if [ -f "$(ROOT)/backend/pom.xml" ]; then \
 	   printf "$(CYAN)▸$(OFF) OWASP Dependency-Check (CVE-2026-24400 / CVE-2023-6378 pins, §2)\n"; \
@@ -231,9 +262,13 @@ cve-scan: ## OWASP Dependency-Check (weekly + on dependency changes; NOT per com
 	       printf "\033[31mSECURITY_STRICT is set — refusing to skip. Provide NVD_API_KEY.\033[0m\n"; exit 1; \
 	     fi; \
 	   else \
+	     printf "  installing reactor modules first (see note below)\n"; \
+	     $(DC_TOOLS) run --rm --no-deps maven -B -ntp -DskipTests \
+	       -Dspotless.check.skip=true -Dcheckstyle.skip=true install || exit 1; \
 	     $(DC_TOOLS) run --rm --no-deps -e NVD_API_KEY maven -B -ntp \
-	       org.owasp:dependency-check-maven:check -DfailBuildOnCVSS=7 \
-	       -DnvdApiKey=$$NVD_API_KEY || exit 1; \
+	       org.owasp:dependency-check-maven:aggregate -DfailBuildOnCVSS=7 \
+	       -DdataDirectory=/workspace/.dependency-check-data \
+	       -DnvdApiKey=$$NVD_API_KEY -DnvdMaxRetryCount=20 -DnvdApiDelay=1000 || exit 1; \
 	   fi; \
 	 else printf "\033[33m! backend/ absent — OWASP Dependency-Check skipped\033[0m\n"; fi
 
