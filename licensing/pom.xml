@@ -6,7 +6,7 @@
   <parent>
     <groupId>io.cassyx</groupId>
     <artifactId>cassyx-parent</artifactId>
-    <version>0.1.0-SNAPSHOT</version>
+    <version>1.0.0</version>
     <!-- The reactor lives in backend/; this module deliberately sits outside it. See the
          `licensing` profile in backend/pom.xml for why. -->
     <relativePath>../backend/pom.xml</relativePath>
@@ -16,7 +16,13 @@
   <description>Operator-run licence minting service. Holds the Ed25519 PRIVATE key; never shipped to customers.</description>
 
   <properties>
-    <checkstyle.config.path>${project.parent.basedir}/config/checkstyle.xml</checkstyle.config.path>
+    <!-- ${project.parent.basedir} is NOT a resolvable Maven property: the parent's basedir is
+         not exposed to a child model, so it survives interpolation as a literal and checkstyle
+         dies with "Could not find resource '${project.parent.basedir}/config/checkstyle.xml'".
+         The backend modules never hit this because they inherit the parent's own
+         ${project.basedir} form and sit inside the reactor. This module deliberately sits
+         outside backend/, so it has to spell the path out relative to itself. -->
+    <checkstyle.config.path>${project.basedir}/../backend/config/checkstyle.xml</checkstyle.config.path>
   </properties>
 
   <dependencies>
