@@ -46,34 +46,45 @@
   </suppress>
 
   <!--
-    CVE-2026-66299 against org.apache.tomcat.embed:tomcat-embed-core.
+    CVE-2026-66299 against the org.apache.tomcat.embed:tomcat-embed-* artifacts.
 
     Not applicable: the vulnerability is uncontrolled resource consumption in Tomcat's WebSocket
     CHAT EXAMPLE, which lives in the `examples` web application. NVD's own description says so
     outright, and adds: "Users who have followed the security guidance to remove the examples web
     application are not affected by this issue."
 
-    The examples webapp ships only in the full Tomcat distribution (apache-tomcat-*.tar.gz). It is
-    not in the embedded jar, which is the only Tomcat artefact cassyx ships. Verified by listing
-    the jar: zero entries match `examples` or `chat`, and the only top-level packages are
-    jakarta/servlet, jakarta/security and org/apache. There is no code path to the vulnerable
-    component because the component is not present.
+    The examples webapp ships only in the full Tomcat distribution (apache-tomcat-*.tar.gz), never
+    in the embedded jars, which are the only Tomcat artifacts cassyx ships. Verified by listing all
+    three at 10.1.57: zero entries match `examples` or `chat` in -core, -el or -websocket. There is
+    no code path to the vulnerable component because the component is not present.
+
+    Note specifically that this does NOT spare -websocket on a technicality. That jar carries the
+    WebSocket protocol IMPLEMENTATION; the CVE is in an example application built on top of it, and
+    that application is not shipped. Every embed artifact is flagged because Dependency-Check
+    matches them all against the same cpe:2.3:a:apache:tomcat:10.1.57, not because the vulnerable
+    code is in any of them.
+
+    Scoping history, since a too-narrow suppression is worse than none: this originally matched
+    only tomcat-embed-core, because that is the artifact the first scan happened to report. The
+    next scan then failed on tomcat-embed-websocket with the identical finding. The CPE applies to
+    the whole family, so the suppression has to as well.
 
     This is a component-not-present suppression, NOT a risk acceptance. The version pin is already
     as high as it can go: every other Tomcat finding was cleared by moving to 10.1.57, and this one
     is fixed in 10.1.58, which Apache had not released to Maven Central at the time of writing.
     When 10.1.58 lands, raise <tomcat.version> and DELETE this entry rather than leaving it to rot.
 
-    Scoped to tomcat-embed-core by packageUrl, so a full Tomcat distribution added later - which
-    WOULD carry the examples webapp - is still reported.
+    Still scoped to the tomcat-embed-* family by packageUrl, so a full Tomcat distribution added
+    later - which WOULD carry the examples webapp - is still reported.
   -->
   <suppress>
     <notes><![CDATA[
       CVE-2026-66299 is a DoS in Tomcat's WebSocket chat EXAMPLE. The examples webapp is not
-      present in tomcat-embed-core (verified by jar listing), only in the full distribution.
+      present in any tomcat-embed-* jar (verified by listing -core, -el and -websocket at
+      10.1.57), only in the full distribution. All three are flagged because they share one CPE.
       Fixed upstream in 10.1.58; remove this entry when that version is available.
     ]]></notes>
-    <packageUrl regex="true">^pkg:maven/org\.apache\.tomcat\.embed/tomcat-embed-core@.*$</packageUrl>
+    <packageUrl regex="true">^pkg:maven/org\.apache\.tomcat\.embed/tomcat-embed-(core|el|websocket)@.*$</packageUrl>
     <cve>CVE-2026-66299</cve>
   </suppress>
 
