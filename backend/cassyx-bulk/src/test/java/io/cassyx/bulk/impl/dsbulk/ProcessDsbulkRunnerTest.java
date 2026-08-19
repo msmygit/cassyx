@@ -352,6 +352,18 @@ class ProcessDsbulkRunnerTest {
   }
 
   @Test
+  @DisplayName("the child JVM's locale is pinned, so the count report is never comma-decimal")
+  void localeIsPinnedOnTheChild() {
+    // DSBulk formats the count report's percentage with "%.2f" and no Locale. On a comma-decimal
+    // host that yields "33,33", which the parser reads as 3333 - a silently wrong row count on a
+    // machine that differs from the developer's only by its regional settings.
+    ProcessDsbulkRunner runner =
+        new ProcessDsbulkRunner(distribution(), "3g", Duration.ofSeconds(1), shell("exit 0"));
+    assertThat(runner.command(plan(DsbulkOperation.COUNT), tmp.resolve("dsbulk.conf")))
+        .contains("-Duser.language=en", "-Duser.country=US");
+  }
+
+  @Test
   @DisplayName("a preview plan's placeholder conf path is replaced by the real one")
   void confPathIsRewritten() {
     assertThat(ProcessDsbulkRunner.rewriteConfPath(List.of("unload", "-f", "dsbulk.conf"), Path.of("/real.conf")))
