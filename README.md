@@ -6,6 +6,56 @@ Astra DB, Amazon Keyspaces and ScyllaDB — vector/SAI/ANN native.
 The authoritative specification is [`docs/plan.md`](docs/plan.md). This README covers the
 developer experience (§2.2) and CI (§11.1).
 
+**Installing cassyx?** Jump to [Install a release](#install-a-release). Everything after that
+section is for people building cassyx, not running it.
+
+---
+
+## Install a release
+
+**Requirements: Docker. That is the entire list** - no source checkout, no Make, no Java, Node or
+Maven. Released images are published to GHCR for **linux/amd64 and linux/arm64**, so Apple Silicon
+runs natively rather than under emulation.
+
+```bash
+mkdir cassyx && cd cassyx
+
+curl -fsSLO https://raw.githubusercontent.com/msmygit/cassyx/main/docker-compose.release.yml
+curl -fsSL  https://raw.githubusercontent.com/msmygit/cassyx/main/.env.release.example -o .env
+
+# Required: the key that encrypts your stored cluster credentials (§3).
+# There is no default on purpose (a shipped one would be public knowledge).
+echo "CASSYX_SECRET_KEY=$(openssl rand -base64 32)" >> .env
+
+# Optional but recommended: pin a version instead of riding `latest`.
+echo "CASSYX_VERSION=1.0.0" >> .env
+
+docker compose -f docker-compose.release.yml up -d
+```
+
+Open <http://localhost:8080>, and paste your licence key into the activation screen (or put it in
+`.env` as `CASSYX_LICENSE_KEY` and restart).
+
+| | |
+| --- | --- |
+| Images | `ghcr.io/msmygit/cassyx-backend`, `ghcr.io/msmygit/cassyx-frontend` |
+| Tags | `1.2.3`, `1.2`, `1`, `latest`. `latest` never moves to a prerelease (`v1.2.3-rc1`). |
+| Update | `docker compose -f docker-compose.release.yml pull && docker compose -f docker-compose.release.yml up -d` |
+| Stop | `docker compose -f docker-compose.release.yml down` (add `--volumes` to also erase your saved connections) |
+| Logs | `docker compose -f docker-compose.release.yml logs -f` |
+
+**No Cassandra is bundled, deliberately.** cassyx manages the clusters you already have: register
+them in the UI (Cassandra, DSE, Astra, Keyspaces, ScyllaDB). Your data never moves into cassyx; the
+`cassyx-data` volume holds only your connections, saved scripts, history, jobs and licence.
+
+Every setting is documented in [`.env.release.example`](.env.release.example). The two that matter:
+`CASSYX_SECRET_KEY` (required; changing it makes saved connections undecryptable) and
+`CASSYX_LICENSE_KEY`.
+
+`docker-compose.release.yml` pulls published images and contains no `build:` stanzas. The
+[`docker-compose.yml`](docker-compose.yml) in this repo is the *development* stack and builds
+everything from source; do not use it to install.
+
 ---
 
 ## Quick start
@@ -47,10 +97,52 @@ dispatcher when it is not, so there is only ever one implementation of each comm
 | `make bench` | The §11.2 performance benchmarks; appends to `bench/trend.csv`. |
 | `make verify` | **The pre-push gate** — exactly what CI runs per PR (contract · lint · arch · unit · integration · e2e · security). |
 | `make seed` | Reload demo data (incl. the vector table for ANN). |
+| `make release-local` | Dry-run a release: build both images, run `docker-compose.release.yml`, smoke it. No push. |
+| `make release-down` | Stop the release stack started by `make release-local` and remove its volumes. |
 
-Supporting targets: `make contract` · `make db` · `make cql` · `make logs` · `make ps` · `make config` ·
-`make clean` · `make restart` · `make lint` · `make arch` · `make unit` · `make integration` ·
-`make security` · `make mutation` · `make compat` · `make show-contracts` · `make help`.
+### Supporting targets
+
+The individual gates `make verify` composes, plus the day-to-day housekeeping. Run one directly
+when you want its signal on its own rather than waiting for the whole pre-push gate.
+
+**Gates** (each is also a CI job, running this exact target):
+
+| Command | What it is for |
+| --- | --- |
+| `make contract` | The API contract gate, and the one that runs first because it is cheapest: `redocly lint` at zero errors *and* zero warnings, every `$ref` resolving, `npm run gen:api` producing clean TypeScript, and live responses checked against the schema for drift (§2.3). |
+| `make lint` | Everything style- and syntax-level at once: `actionlint`, the gitignore guard, `spotless:check` + `checkstyle:check`, `eslint`, `tsc --noEmit`. |
+| `make lint-workflows` | Just `actionlint`. Worth knowing separately: an invalid workflow file does not fail loudly, it makes every job die at startup, so CI silently stops running while still looking like it ran. |
+| `make arch` | ArchUnit rules enforcing the §2.1 modularity contract: no Spring below `cassyx-api`, no module reaching into a sibling's implementation package. |
+| `make unit` | Backend unit tests only. No containers, no network, so it is the fastest useful feedback loop. |
+| `make unit-frontend` | `vitest --coverage` against the 70%-statements gate (§11.1). |
+| `make integration` | `mvn verify`: the integration suite against a shared Testcontainers Cassandra 5.x, plus the per-module JaCoCo coverage gates. |
+| `make smoke` | Boots the real stack and asserts the ungated endpoints actually answer. Catches the class of defect every unit test passes and that kills the app on first boot. |
+| `make security` | The per-commit half: `gitleaks` secret scan + `npm audit`. |
+| `make cve-scan` | OWASP Dependency-Check over the reactor (§2 CVE pins). Weekly and on dependency changes, not per commit: between two commits that do not touch a manifest, only the NVD feed can change the verdict. Needs `NVD_API_KEY`. |
+| `make mutation` | PIT mutation testing on `cassyx-core` + `cassyx-bulk` only, 70% score gate. Nightly: too slow for a PR, and these are the modules where line coverage most easily lies. |
+| `make compat` | Compatibility smoke across the §7.1 target matrix (C\* 3.11 / 4.1 / 5.0 / ScyllaDB). Nightly. |
+
+**Database and stack control:**
+
+| Command | What it is for |
+| --- | --- |
+| `make db` | Start *only* Cassandra 5.x and wait for a real health check. Useful when you want a cluster to poke at and nothing else. |
+| `make cql` | Open an interactive `cqlsh` shell against that dev cluster. |
+| `make ps` | Show what is running. |
+| `make logs` | Follow logs for every running service. |
+| `make open` | Open the app URL in a browser. |
+| `make restart` | `down` then `up`, i.e. a full reset including volumes. |
+| `make clean` | Stop containers but **keep** volumes, so seeded data and the H2 store survive. The gentler `make down`. |
+| `make nuke` | `down` plus a prune of dangling cassyx images. |
+
+**Release and introspection:**
+
+| Command | What it is for |
+| --- | --- |
+| `make release-version` | Print the reactor version. With `TAG=v1.2.3`, assert the tag matches `backend/pom.xml` (the same guard the release workflow runs first). |
+| `make config` | Validate `docker-compose.yml` across every profile without starting anything. |
+| `make show-contracts` | Print the [Build contracts](#build-contracts) section, i.e. the interface other workstreams' `backend/` and `frontend/` must satisfy. |
+| `make help` | List every target with its one-line description. |
 
 `make db`, `make seed`, `make cql`, `make config`, `make contract` and `make compat` work with **no
 backend or frontend present** — useful while those workstreams are still landing.
@@ -239,6 +331,66 @@ plus build output. Do not widen it to whole files.
 
 ---
 
+## Cutting a release (maintainers)
+
+`.github/workflows/release.yml` fires on a pushed `v*` tag and does, in order: **guard → build →
+boot → smoke → push → GitHub Release**. Nothing reaches GHCR that has not been started and
+answered a request first, so a broken image is a failed workflow rather than something to yank.
+
+```bash
+# 1. Bump the reactor version. The tag must match it EXACTLY (see below).
+#    backend/pom.xml <version>, plus every module's <parent><version>.
+$EDITOR backend/pom.xml
+
+# 2. Prove it locally: builds both images, runs docker-compose.release.yml, smokes it.
+#    Same sequence the workflow runs, minus the push.
+make release-local
+make release-down
+
+# 3. Merge to main via PR and let CI go green there.
+
+# 4. Tag the merge commit and push.
+git switch main && git pull
+git tag -a v1.2.3 -m "cassyx 1.2.3"
+git push origin v1.2.3
+```
+
+Watch the `release` workflow. Prereleases are just semver: `v1.2.3-rc1` publishes `1.2.3-rc1`
+only; the rolling `1.2`, `1` and `latest` tags stay on the last stable release, and the GitHub
+Release is flagged as a prerelease.
+
+`workflow_dispatch` on the same workflow is a **dry run**: it builds both architectures, boots the
+release stack and smokes it, then pushes nothing. Use it to test a change to the pipeline without
+spending a version number.
+
+**The tag must equal `<version>` in `backend/pom.xml`.** The `guard` job enforces it via
+[`scripts/release-version.sh`](scripts/release-version.sh) and refuses to build otherwise. This is
+not tidiness: the reactor version is what the running app reports from `/api/health` **and what
+licence scope is checked against** (§9.5). Tagging `v2.0.0` over a pom that still says `1.0.0`
+would publish an image that believes it is v1, so every customer's licence gate decides against
+the wrong major. Check it any time with `make release-version TAG=v1.2.3`.
+
+Published images are built with `--build-arg CASSYX_BYPASS_PROFILE=release`, which bakes
+`cassyx.license.bypass-allowed=false` so a release image cannot be unlocked by setting
+`CASSYX_LICENSE_ENFORCE=false` (§9.2). That build arg ships with the `feat/site-licence` branch;
+until it merges `backend/Dockerfile` declares no such `ARG` and buildx silently ignores it, which
+is expected and forward-compatible.
+
+Prerequisites, one time only: GHCR publishing uses the built-in `GITHUB_TOKEN` (the workflow
+requests `packages: write`), so there is no registry secret to manage. After the first release,
+make the two packages public in the repo's Packages settings, or customers get a 401 on `pull`.
+
+> **Known blocker before the first real tag.** Nothing in the build injects the reactor version
+> into the running app: `HealthController` and `LicenseController` both read
+> `${cassyx.version:0.1.0-SNAPSHOT}`, that property is defined nowhere, and the jar manifest
+> carries no `Implementation-Version`, so the hardcoded default always wins. `/api/health` on a
+> `1.0.0` build still reports `0.1.0-SNAPSHOT`, and §9.5 licence scope is derived from that string
+> (parsing to major 0, i.e. unscoped). The release smoke check fails on this deliberately. Fix in
+> `backend/pom.xml`: enable resource filtering and set `cassyx.version: @project.version@` in
+> `application.yml`, or bind the `spring-boot-maven-plugin` `build-info` goal.
+
+---
+
 ## Troubleshooting
 
 | Symptom | Fix |
@@ -249,6 +401,9 @@ plus build output. Do not widen it to whole files.
 | `vector<float,1536>` DDL fails during seed | You are not on Cassandra 5.x. Check `CASSANDRA_IMAGE` in `.env`. |
 | Testcontainers cannot reach Docker | The Maven container mounts `/var/run/docker.sock`; on non-standard daemons set `DOCKER_HOST` / `TESTCONTAINERS_HOST_OVERRIDE`. |
 | Stale data after a schema change | `make down && make up` (removes volumes), or just `make seed`. |
+| `set CASSYX_SECRET_KEY in .env` on the release stack | Required, no default. `echo "CASSYX_SECRET_KEY=$(openssl rand -base64 32)" >> .env`. |
+| `denied` / 401 pulling `ghcr.io/msmygit/cassyx-*` | The packages are private. Maintainers: make them public in the repo's Packages settings. |
+| `release` workflow fails at `guard` | The tag and `backend/pom.xml` disagree. Fix the pom, re-tag; see [Cutting a release](#cutting-a-release-maintainers). |
 
 ---
 

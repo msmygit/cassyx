@@ -11,7 +11,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SERVICE="${1:?usage: wait-for-health.sh <service> [timeout]}"
 TIMEOUT="${2:-300}"
-COMPOSE=(docker compose -f "$ROOT/docker-compose.yml")
+# Defaults to the dev stack. The release pipeline waits on the SAME services in
+# docker-compose.release.yml, so the file is a parameter rather than a second
+# copy of this script: CASSYX_COMPOSE_FILE=docker-compose.release.yml.
+COMPOSE=(docker compose -f "${CASSYX_COMPOSE_FILE:-$ROOT/docker-compose.yml}")
 
 printf '\033[36m[wait]\033[0m %s: waiting up to %ss for health...\n' "$SERVICE" "$TIMEOUT"
 
