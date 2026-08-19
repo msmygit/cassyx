@@ -16,7 +16,36 @@
     <checkstyle.config.path>${project.parent.basedir}/config/checkstyle.xml</checkstyle.config.path>
     <!-- section 11.1 gate: 60% - thin adapters, covered by integration + E2E instead. -->
     <cassyx.coverage.line>0.60</cassyx.coverage.line>
+    <!-- Baked into application.yml at package time (plan section 9.2). Declared here as well as in
+         the profiles below so the property always resolves, even when some unrelated profile is
+         activated on the command line and deactivates `dev`. -->
+    <cassyx.license.bypass.allowed>true</cassyx.license.bypass.allowed>
   </properties>
+
+  <profiles>
+    <!--
+      Plan section 9.2. CASSYX_LICENSE_ENFORCE=false is documented, so anyone who reads the README
+      can unlock the paid product with one env var, and nothing in the code can tell our own CI from
+      a customer who read the docs. The switch has real uses, so it is not deleted - it is gated at
+      BUILD time here, and the legitimate users get a free signed `site` licence instead.
+    -->
+    <profile>
+      <id>dev</id>
+      <activation>
+        <activeByDefault>true</activeByDefault>
+      </activation>
+      <properties>
+        <cassyx.license.bypass.allowed>true</cassyx.license.bypass.allowed>
+      </properties>
+    </profile>
+    <!-- Used by backend/Dockerfile, i.e. by every published image. -->
+    <profile>
+      <id>release</id>
+      <properties>
+        <cassyx.license.bypass.allowed>false</cassyx.license.bypass.allowed>
+      </properties>
+    </profile>
+  </profiles>
 
   <dependencies>
     <dependency>
@@ -98,7 +127,41 @@
   </dependencies>
 
   <build>
+    <!-- Only application.yml is filtered, and only on the @...@ delimiter: the file is full of
+         ${CASSYX_*} Spring placeholders, and the default ${...} delimiter would put Maven and
+         Spring in competition for them. Everything else (Flyway migrations especially) is copied
+         byte-for-byte. -->
+    <resources>
+      <resource>
+        <directory>src/main/resources</directory>
+        <filtering>true</filtering>
+        <includes>
+          <include>application.yml</include>
+        </includes>
+      </resource>
+      <resource>
+        <directory>src/main/resources</directory>
+        <filtering>false</filtering>
+        <excludes>
+          <exclude>application.yml</exclude>
+        </excludes>
+      </resource>
+    </resources>
     <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-resources-plugin</artifactId>
+        <!-- Pinned rather than inherited from the Maven distribution: the filtering below decides
+             whether the shipped image honours the licence bypass, so it must not vary with the
+             Maven version that happens to build the image. -->
+        <version>3.3.1</version>
+        <configuration>
+          <useDefaultDelimiters>false</useDefaultDelimiters>
+          <delimiters>
+            <delimiter>@</delimiter>
+          </delimiters>
+        </configuration>
+      </plugin>
       <plugin>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-maven-plugin</artifactId>

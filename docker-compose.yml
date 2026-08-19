@@ -101,6 +101,11 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      args:
+        # §9.2: the image defaults to the `release` Maven profile, which bakes the licence bypass
+        # OFF. A local `make up` has no signed licence, so it builds `dev` and keeps honouring
+        # CASSYX_LICENSE_ENFORCE below. Published images take the Dockerfile default.
+        CASSYX_BYPASS_PROFILE: ${CASSYX_BYPASS_PROFILE:-dev}
     container_name: ${COMPOSE_PROJECT_NAME:-cassyx}-backend
     depends_on:
       cassandra:

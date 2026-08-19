@@ -60,6 +60,12 @@ logging:
 cassyx:
   license:
     enforce: ${CASSYX_LICENSE_ENFORCE:true}   # false => fully unlocked, no checks
+    # BUILD-time gate on the line above (plan section 9.2), filtered in by Maven: true from the
+    # `dev` profile, false from `release` (which is what backend/Dockerfile builds). When false,
+    # CASSYX_LICENSE_ENFORCE=false is IGNORED and a WARN naming it is logged. Deliberately not an
+    # env var: a runtime switch guarding a runtime switch guards nothing. The supported way to run
+    # a release build unlocked is a free signed site licence in CASSYX_LICENSE_KEY.
+    bypass-allowed: @cassyx.license.bypass.allowed@
     key:     ${CASSYX_LICENSE_KEY:}
     # Only the PUBLIC half of the Ed25519 key pair ever ships (plan section 9.1). Minting happens
     # in the separate licensing/ deployment, which holds the private key.

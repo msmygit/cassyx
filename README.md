@@ -124,6 +124,46 @@ Phase 1 workstreams add their journeys under `e2e/tests/`; seed fixtures are lis
 
 ---
 
+## Licensing (§9.2)
+
+How the licence *key* works. For the terms cassyx is distributed under, see
+[Licence](#licence) at the end of this file.
+
+cassyx is one paid tier: one payment unlocks everything. Two things unlock an instance without
+paying, and only one of them works in a published build.
+
+**Site licence:** the supported way. A `site` licence is an ordinary Ed25519-signed key with
+`edition: "site"`: unlimited seats, normally perpetual, verified entirely offline by the same code
+as a paid key. It is issued **free on request** for CI, evaluation and enterprise self-hosting (we
+can also issue a time-boxed one, `expires` and `scope` still apply if present). Set it and nothing
+else:
+
+```bash
+CASSYX_LICENSE_KEY=<the signed key>
+CASSYX_LICENSE_PUBLIC_KEY=<the shipped public key>
+```
+
+The UI badges a site licence as granted; it is not the `unlicensed-bypass` state and carries no
+warning banner.
+
+**`CASSYX_LICENSE_ENFORCE=false`:** development builds only. The flag still fully unlocks a build
+made with the `dev` Maven profile, which is what `make up`, `make dev` and CI build, so the
+developer experience is unchanged. Published images are built with the `release` profile
+(`backend/Dockerfile` defaults to it), which bakes `cassyx.license.bypass-allowed=false`. There the
+flag is **ignored**: enforcement stays on, `GET /api/license` reports `enforce: true` /
+`bypass: false`, and a startup WARN names `CASSYX_LICENSE_ENFORCE` so nobody is left wondering why
+their flag did nothing.
+
+To build an unlocked image deliberately: `CASSYX_BYPASS_PROFILE=dev make up` (already the default
+in `.env.example`), or `docker build --build-arg CASSYX_BYPASS_PROFILE=dev backend/`.
+
+Being honest about what this buys: it raises the cost of a casual bypass from "read the README" to
+"patch and rebuild the jar". Self-hosted software the customer runs, and can recompile, is not
+tamper-proof, no scheme short of a hosted service is. What it removes is the *supported,
+documented* free unlock, and it replaces it with a credential we can issue, scope and time-box.
+
+---
+
 ## Seed data
 
 `make seed` applies [`scripts/seed.cql`](scripts/seed.cql) and then
@@ -233,6 +273,9 @@ cassyx/
 ---
 
 ## Licence
+
+The terms cassyx is distributed under. For how the licence *key* works, and how to run an instance
+unlocked, see [Licensing (§9.2)](#licensing-92) above.
 
 Cassyx is source-available under the **Elastic License 2.0** (ELv2). See [`LICENSE`](LICENSE).
 

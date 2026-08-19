@@ -138,6 +138,26 @@ along the way that is a backend/contract concern, not something to patch around 
   collect it (Checkout can collect email itself when omitted), or (b) confirm the frontend must
   collect an email before calling checkout in those states and I'll wire a prompt. Not fixed here —
   `openapi/**` is out of scope for this workstream.
+## Site licence, needs frontend
+
+Backend side is done (plan §9.2): `GET /api/license` can now return `edition: "site"`, and a
+refused bypass reports `enforce: true` / `bypass: false` rather than claiming to be bypassed.
+The UI still needs:
+
+- **A `site` badge.** `edition: "site"` is a GRANTED licence, not a bypass: it must NOT render the
+  yellow `unlicensed-bypass` warning banner. Suggested copy: "Site licence, unlimited seats".
+  Everything else about the screen is the same as a paid `standard` licence.
+- **Time-boxed site licences exist.** `expires` / `daysRemaining` can be non-null on a `site`
+  licence (an evaluation site licence), so the countdown must not be gated on `trial === true`.
+  When it lapses, `state` is `EXPIRED` with `edition: "site"` and `trial: false`, the copy should
+  say the site licence expired, not that a trial did.
+- **Do not infer "unlocked" from the `enforce` flag alone.** The API now reports the EFFECTIVE
+  value: a release build that was given `CASSYX_LICENSE_ENFORCE=false` reports `enforce: true`,
+  `bypass: false`. Render on `licensed` + `state`, and use `bypass` only to decide the bypass
+  banner.
+- **Locked-screen copy for release builds.** When `licensed: false`, the purchase screen should
+  mention that a free site licence is available for CI, evaluation and enterprise use, since
+  telling those users to flip an env var no longer helps them in a published image.
 
 ## Process-tree cancellation — CLOSED
 

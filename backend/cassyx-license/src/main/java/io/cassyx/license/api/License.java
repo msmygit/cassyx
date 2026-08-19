@@ -36,6 +36,20 @@ public record License(
 
   public static final String STANDARD_EDITION = "standard";
 
+  /**
+   * Site licence (plan section 9.2): unlimited seats, issued free on request for CI, evaluation and
+   * enterprise deployments. It is a NORMAL signed licence verified by exactly the same code path -
+   * the only thing that makes it a site licence is the edition string in the signed payload, so
+   * there is nothing here to switch on and nothing to forge without the private key.
+   *
+   * <p>Normally perpetual and unscoped, but {@code expires} and {@code scope} still apply when
+   * present: a time-boxed evaluation site licence is a real thing we issue.
+   *
+   * <p>Deliberately NOT {@link #BYPASS_EDITION} - a site licence was granted, so the UI names it
+   * rather than warning about it.
+   */
+  public static final String SITE_EDITION = "site";
+
   /** Time-limited evaluation license (plan section 9.4). Always carries {@link #expires()}. */
   public static final String TRIAL_EDITION = "trial";
 
@@ -76,6 +90,11 @@ public record License(
 
   public boolean isTrial() {
     return TRIAL_EDITION.equals(edition);
+  }
+
+  /** A granted, unlimited-seat site licence (plan section 9.2) - not a bypass. */
+  public boolean isSite() {
+    return SITE_EDITION.equals(edition);
   }
 
   /** A licence with no {@code expires} never lapses. Paid keys are perpetual by design. */

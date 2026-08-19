@@ -1,5 +1,6 @@
 package io.cassyx.api.license;
 
+import io.cassyx.license.api.BypassPolicy;
 import io.cassyx.license.api.License;
 import io.cassyx.license.api.LicenseFactory;
 import io.cassyx.license.api.LicenseState;
@@ -26,13 +27,14 @@ public class LicenseController {
 
   private final LicenseVerifier verifier;
   private final String configuredKey;
-  private final boolean enforce;
+  private final BypassPolicy bypassPolicy;
   private final int appMajor;
 
   public LicenseController(
       @Value("${cassyx.license.public-key:}") String publicKeyBase64,
       @Value("${cassyx.license.key:}") String configuredKey,
       @Value("${cassyx.license.enforce:true}") boolean enforce,
+      @Value("${cassyx.license.bypass-allowed:true}") boolean bypassAllowed,
       @Value("${cassyx.version:0.1.0-SNAPSHOT}") String version) {
     // The shipped default for cassyx.license.public-key is the literal "PLACEHOLDER", which is not
     // a decodable Ed25519 key. Building the verifier eagerly therefore threw in the constructor and
@@ -44,7 +46,9 @@ public class LicenseController {
     // this endpoint must still be reachable to say.
     this.verifier = tryBuildVerifier(publicKeyBase64);
     this.configuredKey = configuredKey;
-    this.enforce = enforce;
+    // The build-time gate of plan section 9.2: in a release build enforce=false is inert, so every
+    // answer this endpoint gives is derived from the POLICY, never from the raw flag.
+    this.bypassPolicy = BypassPolicy.of(enforce, bypassAllowed);
     this.appMajor = majorOf(version);
   }
 
@@ -66,22 +70,36 @@ public class LicenseController {
   }
 
   /**
-   * Verification, tolerant of an unconfigured public key. When enforcement is off the bypass wins
-   * outright (plan section 9.2); when it is on and no key is configured, we report {@code MALFORMED}
-   * with an operator-facing reason rather than pretending the licence is merely absent - those are
-   * different problems with different fixes.
+   * Verification, tolerant of an unconfigured public key. When the bypass is granted it wins
+   * outright (plan section 9.2); when it is refused or never asked for and no public key is
+   * configured, we report {@code MALFORMED} with an operator-facing reason rather than pretending
+   * the licence is merely absent - those are different problems with different fixes.
    */
   private LicenseStatus check(String key) {
-    if (!enforce) {
-      return LicenseFactory.check(verifier, key, false);
+    if (bypassPolicy.granted()) {
+      return LicenseFactory.check(verifier, key, false, true);
     }
     if (verifier == null) {
       return LicenseStatus.invalid(
           "cassyx.license.public-key is not configured, so no licence can be verified. "
-              + "Set CASSYX_LICENSE_PUBLIC_KEY, or set CASSYX_LICENSE_ENFORCE=false to run unlocked.",
+              + "Set CASSYX_LICENSE_PUBLIC_KEY. "
+              + unlockAdvice(),
           LicenseState.MALFORMED);
     }
-    return LicenseFactory.check(verifier, key, true);
+    // Not granted, so enforcement is on whatever the flag said: verify for real.
+    return LicenseFactory.check(verifier, key, true, bypassPolicy.allowed());
+  }
+
+  /**
+   * The honest way out of a locked instance, which differs by build: a dev build still takes the
+   * env flag, a release build does not and needs a signed site licence instead. Telling a release
+   * operator to set a flag that this build ignores is worse than saying nothing.
+   */
+  private String unlockAdvice() {
+    return bypassPolicy.allowed()
+        ? "Or set CASSYX_LICENSE_ENFORCE=false to run unlocked (development builds only)."
+        : "To run unlocked, request a free site licence (CI, evaluation, enterprise) and set "
+            + "CASSYX_LICENSE_KEY; " + BypassPolicy.ENFORCE_ENV_VAR + " is ignored in this build.";
   }
 
   /**
@@ -101,10 +119,14 @@ public class LicenseController {
 
   private LicenseStatusResponse describe(LicenseStatus status) {
     License license = status.license();
-    boolean bypass = status.state() == LicenseState.BYPASS || !enforce;
+    // A refused bypass must never be reported as a bypass: the flag was set, and nothing happened.
+    // `enforce` is likewise the EFFECTIVE value, so the tuple (enforce, bypass, edition, state)
+    // never contradicts itself - a client that trusts `enforce=false` would otherwise show an
+    // "unlocked" UI over an instance that is verifying licences.
+    boolean bypass = bypassPolicy.granted() || status.state() == LicenseState.BYPASS;
     return new LicenseStatusResponse(
         status.valid(),
-        enforce,
+        bypassPolicy.enforcing(),
         bypass,
         edition(license, bypass, status),
         status.state() == null ? null : status.state().name(),
