@@ -791,6 +791,38 @@ body preserved for signature verification), `POST /api/license/activate`, `GET /
 > operate. The distributed app only ever *verifies*. Sandbox setup for development:
 > `npm i -g @stripe/cli && stripe sandbox create` produces working test keys with no registration.
 
+**Delivery: the last step of fulfilment, and the one that decides whether a sale completed.** A
+minted, persisted, unemailed key is a customer who paid and received nothing, so `licensing/`
+selects a `LicenseEmailSender` on `CASSYX_LICENSING_EMAIL_PROVIDER`:
+
+| Provider | Behaviour |
+| --- | --- |
+| `log` (default) | Writes the whole message, licence key included, to the service log. Development only, WARNs on every send. |
+| `smtp` | Real delivery via `spring-boot-starter-mail`. multipart/alternative (plain text *and* HTML), body differing per `PURCHASE` / `TRIAL` / `RECOVERY`. |
+
+An unrecognised value **fails startup**, never falling back: a silent fallback to `log` is
+indistinguishable from a service that is emailing everybody correctly, which is the worst possible
+failure mode for something on the payment path.
+
+SMTP rather than a vendor API SDK, deliberately. Postmark, SES, Resend, Mailgun, Fastmail and Gmail
+all speak SMTP, so one implementation covers whichever the operator picks and switching is an
+env-var change rather than a code change; and it adds no vendor SDK to the one service holding the
+Ed25519 private key. Three properties are load-bearing:
+
+- **Timeouts on connect, read and write.** Jakarta Mail defaults all three to infinite, and this
+  send runs inside the webhook handler - a hung SMTP socket would stall fulfilment for every buyer
+  behind it and trigger Stripe redelivery on top. Failing is recoverable; hanging is not.
+- **Bounded retries, transient only.** A permanent rejection (bad credentials, rejected recipient,
+  any 5xx reply) is not retried at all. On giving up the sender throws, the licence is recorded
+  undelivered, and `POST /licensing/recover` (which already exists) owns everything beyond that.
+- **Never logs the key or the SMTP password.** The `log` provider prints keys because that is its
+  entire purpose as a development tool; the SMTP path logs recipient, reason, licence code and the
+  provider's own response, on the success and the exception path alike.
+
+Deliverability is an operator prerequisite, not a nice-to-have: SPF, DKIM and DMARC on a sending
+domain the operator controls, documented in `licensing/README.md`, because licence email filed as
+spam is indistinguishable from licence email never sent.
+
 ### 9.4 Trial licenses
 
 Nobody buys a database tool they have not pointed at their own cluster. Without a trial the funnel

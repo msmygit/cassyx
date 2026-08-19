@@ -47,8 +47,30 @@ cassyx:
       api-base-url:   ${CASSYX_BILLING_API_URL:https://api.stripe.com}
     email:
       # 'log' writes the whole email (including the key) to the log instead of sending it, so the
-      # service runs end to end with no provider account. Not for production.
-      provider: ${CASSYX_LICENSING_EMAIL_PROVIDER:log}
-      from:     ${CASSYX_LICENSING_EMAIL_FROM:licensing@cassyx.dev}
-      reply-to: ${CASSYX_LICENSING_EMAIL_REPLY_TO:support@cassyx.dev}
-      subject:  ${CASSYX_LICENSING_EMAIL_SUBJECT:Your cassyx licence key}
+      # service runs end to end with no provider account. Not for production. 'smtp' is the real
+      # one. Anything else fails startup rather than quietly logging keys nobody reads.
+      provider:  ${CASSYX_LICENSING_EMAIL_PROVIDER:log}
+      from:      ${CASSYX_LICENSING_EMAIL_FROM:licensing@cassyx.dev}
+      from-name: ${CASSYX_LICENSING_EMAIL_FROM_NAME:cassyx}
+      reply-to:  ${CASSYX_LICENSING_EMAIL_REPLY_TO:support@cassyx.dev}
+      subject:   ${CASSYX_LICENSING_EMAIL_SUBJECT:Your cassyx licence key}
+      # Both optional: blank simply omits the line from the email rather than printing a dead link.
+      purchase-url: ${CASSYX_LICENSING_PURCHASE_URL:}
+      recovery-url: ${CASSYX_LICENSING_RECOVERY_URL:}
+      smtp:
+        host:     ${CASSYX_LICENSING_SMTP_HOST:}
+        port:     ${CASSYX_LICENSING_SMTP_PORT:587}
+        username: ${CASSYX_LICENSING_SMTP_USERNAME:}
+        password: ${CASSYX_LICENSING_SMTP_PASSWORD:}
+        # starttls (587) | ssl (implicit TLS, 465) | none (local test server ONLY - 'none' sends
+        # the customer's licence key over the wire in clear text).
+        tls:      ${CASSYX_LICENSING_SMTP_TLS:starttls}
+        # Jakarta Mail defaults every one of these to INFINITE. A hung provider must fail
+        # fulfilment (the key is already persisted and recoverable), never stall it.
+        connection-timeout-ms: ${CASSYX_LICENSING_SMTP_CONNECT_TIMEOUT_MS:10000}
+        read-timeout-ms:       ${CASSYX_LICENSING_SMTP_READ_TIMEOUT_MS:15000}
+        write-timeout-ms:      ${CASSYX_LICENSING_SMTP_WRITE_TIMEOUT_MS:15000}
+        # Bounded, and small on purpose: this runs inside the Stripe webhook handler, and anything
+        # beyond a couple of quick retries is POST /licensing/recover's job.
+        max-attempts:   ${CASSYX_LICENSING_SMTP_MAX_ATTEMPTS:3}
+        retry-delay-ms: ${CASSYX_LICENSING_SMTP_RETRY_DELAY_MS:500}

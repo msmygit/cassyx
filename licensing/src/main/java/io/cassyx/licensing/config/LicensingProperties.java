@@ -32,6 +32,41 @@ public record LicensingProperties(
   /**
    * @param provider {@code log} (default, no account needed) or {@code smtp}
    * @param from envelope sender used by real providers
+   * @param fromName display name shown beside {@code from}; a bare address reads as machine spam
+   * @param purchaseUrl where a trial recipient goes to buy; omitted from the body when blank
+   * @param recoveryUrl where a customer re-requests a lost key; omitted from the body when blank
    */
-  public record Email(String provider, String from, String replyTo, String subject) {}
+  public record Email(
+      String provider,
+      String from,
+      String fromName,
+      String replyTo,
+      String subject,
+      String purchaseUrl,
+      String recoveryUrl,
+      Smtp smtp) {}
+
+  /**
+   * SMTP transport settings. Every mainstream provider (Postmark, SES, Resend, Mailgun, Fastmail,
+   * Gmail) speaks SMTP, so these values are the whole of "which provider are we using".
+   *
+   * @param tls {@code starttls} (submission port 587, the usual choice), {@code ssl} (implicit TLS
+   *     on 465) or {@code none} - the last one exists for a local test server and nothing else
+   * @param connectionTimeoutMs bound on the TCP connect. Not optional: Jakarta Mail's default is
+   *     infinite, and a hung SMTP socket inside the Stripe webhook handler stalls fulfilment for
+   *     every buyer behind it, not just this one.
+   * @param maxAttempts total attempts including the first; deliberately small, because retrying
+   *     past a couple of tries is the recovery endpoint's job
+   */
+  public record Smtp(
+      String host,
+      int port,
+      String username,
+      String password,
+      String tls,
+      int connectionTimeoutMs,
+      int readTimeoutMs,
+      int writeTimeoutMs,
+      int maxAttempts,
+      long retryDelayMs) {}
 }
