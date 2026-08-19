@@ -4,6 +4,7 @@
   "version": "1.0.0",
   "type": "module",
   "description": "cassyx — self-hosted CQL IDE, data manager and bulk data mover (frontend)",
+  "license": "SEE LICENSE IN LICENSE",
   "engines": {
     "node": ">=20"
   },

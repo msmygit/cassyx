@@ -620,6 +620,29 @@ Keyspaces in particular needs the bulk path to fall back from token-range scan t
 
 Per the decision: **one paid tier, everything included, one-time payment, plus a bypass flag.**
 
+### 9.0 Distribution licence
+
+Cassyx is distributed under the **Elastic License 2.0** (ELv2); see `LICENSE` at the repository
+root. Source-available, not OSI-approved: anyone can read, self-host, and modify it, but ELv2's
+Limitations clause specifically prohibits (a) offering it to third parties as a hosted or managed
+service, (b) moving, changing, disabling, or circumventing the licence-key functionality (or
+removing/obscuring any feature that functionality protects), and (c) altering or removing licensing
+or copyright notices.
+
+Clause (b) is why ELv2 replaced an earlier, mistaken MIT licensing of this repository: MIT grants
+unrestricted rights to redistribute a modified fork with the §9.1 licence check deleted, which makes
+the entire monetization model in this section unenforceable as a matter of law. ELv2 does not change
+anything about how §9.1 (the Ed25519 key gate) or §9.2 (the sanctioned bypass) work technically. The
+sanctioned bypass remains a legitimate, in-licence route for development, CI, evaluation and
+enterprise site deployments. What ELv2 adds is that stripping or circumventing the gate outside of
+those sanctioned uses is now also a licence violation, not just a code change someone could make.
+
+Be plain about what this does and does not do: **a licence is a legal control, not a technical
+one.** ELv2 does not make self-hosted software tamper-proof; nothing running on hardware the
+licensee controls can be. It raises the cost and consequence of bypass (breach of contract, loss of
+licence, potential liability) without pretending to prevent it outright. The Ed25519 signing scheme
+in §9.1 remains the technical control; ELv2 is what makes defeating it something other than free.
+
 ### 9.1 Enforcement model
 
 Offline **Ed25519-signed license key**. The app embeds only a *public* key, so a leaked build

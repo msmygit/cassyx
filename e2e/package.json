@@ -3,6 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "description": "Playwright E2E harness for cassyx (plan §11.2). Runs in the official Playwright container, so no local Node is required.",
+  "license": "SEE LICENSE IN LICENSE",
   "type": "module",
   "scripts": {
     "test": "playwright test",

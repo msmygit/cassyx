@@ -229,3 +229,28 @@ cassyx/
 ├── bench/trend.csv        committed benchmark trend (nightly appends)
 └── .github/workflows/     ci.yml (per-PR) · nightly.yml
 ```
+
+---
+
+## Licence
+
+Cassyx is source-available under the **Elastic License 2.0** (ELv2). See [`LICENSE`](LICENSE).
+
+You are free to read the source, self-host it, and modify it for your own use. What ELv2 does not
+allow is:
+
+- offering Cassyx to third parties as a hosted or managed service;
+- moving, changing, disabling or circumventing the licence-key functionality described in
+  `docs/plan.md` §9, or removing/obscuring any feature it protects;
+- altering or removing licensing or copyright notices.
+
+In short: **bypassing the licence key, other than through the sanctioned mechanism documented in
+`docs/plan.md` §9.2, is a licence violation.**
+
+Worth being clear about what this does and does not buy: ELv2 is a legal control, not a technical
+one. It does not make a self-hosted binary tamper-proof. What it does is make circumvention an
+actionable breach rather than merely something we would prefer you did not do.
+
+Cassyx is a one-time paid purchase, not a subscription. See `docs/plan.md` §9 for how the licence
+key and checkout work; purchase and activation happen through the in-app pricing screen once
+billing is enabled.
