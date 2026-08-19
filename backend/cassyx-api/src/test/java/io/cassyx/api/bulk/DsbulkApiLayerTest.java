@@ -281,4 +281,91 @@ class DsbulkApiLayerTest {
     assertThat(DsbulkJobRepository.truncate("short")).isEqualTo("short");
     assertThat(DsbulkJobRepository.truncate("x".repeat(5000))).hasSize(4000).endsWith("...");
   }
+
+  /* ------------------------------------------------------------------ count / statistics */
+
+  @Test
+  @DisplayName("partitionCount is null: DSBulk reports top-N partitions, never a total")
+  void partitionCountIsNotFabricated() {
+    DsbulkCountReport report = new DsbulkCountReport(
+        1_000,
+        List.of(),
+        List.of(),
+        List.of(new DsbulkCountReport.PartitionCount("a", 9), new DsbulkCountReport.PartitionCount("b", 1)));
+
+    TableStatistics statistics =
+        TableStatistics.from(report, "demo", "users", "job-1", "2026-08-18T00:00:00Z", 10);
+
+    // It used to be largestPartitions().size(), i.e. the top-N cap reported as a measurement: the
+    // number was 10 on every table in the world.
+    assertThat(statistics.partitionCount()).isNull();
+    assertThat(statistics.largestPartitions()).hasSize(2);
+  }
+
+  @Test
+  @DisplayName("range and replica sections are capped, and say so instead of shortening silently")
+  void detailSectionsAreCapped() {
+    int reported = DsbulkDtos.TableStatistics.MAX_DETAIL_ROWS + 120;
+    List<DsbulkCountReport.RangeCount> ranges = new java.util.ArrayList<>(reported);
+    for (int i = 0; i < reported; i++) {
+      ranges.add(new DsbulkCountReport.RangeCount(Long.toString(i), Long.toString(i + 1), i));
+    }
+
+    TableStatistics statistics = TableStatistics.from(
+        new DsbulkCountReport(1_000, List.of(), ranges, List.of()),
+        "demo", "users", "job-1", "2026-08-18T00:00:00Z", 10);
+
+    assertThat(statistics.perTokenRange()).hasSize(DsbulkDtos.TableStatistics.MAX_DETAIL_ROWS);
+    assertThat(statistics.perTokenRangeTruncated()).isTrue();
+    assertThat(statistics.perTokenRangeReported()).isEqualTo(reported);
+    // Ranked before the cut, so the surviving rows are the ones carrying the skew - not whichever
+    // ranges DSBulk happened to print first.
+    assertThat(statistics.perTokenRange().get(0).rows()).isEqualTo(reported - 1);
+    assertThat(statistics.perReplicaTruncated()).isFalse();
+  }
+
+  @Test
+  @DisplayName("a table with no clustering column cannot run the partitions mode - 422, not a crash")
+  void partitionsModeNeedsAClusteringColumn() {
+    DsbulkProbe noClustering = new DsbulkProbe(
+        3, 8, io.cassyx.core.api.ClusterFlavor.CASSANDRA, false, false, false, null, Map.of());
+
+    assertThatThrownBy(() -> CountJobController.reject(
+            noClustering, List.of("global", "partitions"), "demo", "users"))
+        .isInstanceOf(CountModeUnsupportedException.class)
+        .hasMessageContaining("no clustering column");
+
+    // The same table counts perfectly well without that mode.
+    CountJobController.reject(noClustering, List.of("global", "ranges"), "demo", "users");
+  }
+
+  @Test
+  @DisplayName("Keyspaces refuses ranges/hosts/partitions rather than downgrading them silently")
+  void keyspacesRefusesTokenRangeModes() {
+    DsbulkProbe keyspaces = new DsbulkProbe(
+        3, 8, io.cassyx.core.api.ClusterFlavor.AMAZON_KEYSPACES, true, false, false, null, Map.of());
+
+    assertThatThrownBy(() -> CountJobController.reject(
+            keyspaces, List.of("global", "ranges"), "demo", "users"))
+        .isInstanceOf(CountModeUnsupportedException.class)
+        .hasMessageContaining("token()");
+
+    // `global` survives: it falls back to the native paging engine (plan section 7.1).
+    CountJobController.reject(keyspaces, List.of("global"), "demo", "users");
+  }
+
+  @Test
+  @DisplayName("the contract's biggest-partitions spelling is gated as `partitions`, not waved through")
+  void contractModeSpellingIsNormalised() {
+    assertThat(CountJobController.normalise(List.of("BIGGEST-PARTITIONS", "global", "global")))
+        .containsExactly("partitions", "global");
+    assertThat(CountJobController.normalise(null)).containsExactly("global");
+    assertThat(CountJobController.normalise(List.of("  "))).containsExactly("global");
+  }
+
+  @Test
+  @DisplayName("an unprobeable cluster is not refused on facts we do not have")
+  void unknownProbeDoesNotBlockAnyMode() {
+    CountJobController.reject(DsbulkProbe.UNKNOWN, List.of("global", "ranges", "partitions"), "demo", "users");
+  }
 }

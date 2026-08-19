@@ -152,6 +152,36 @@ public final class DsbulkPlanner {
       warnings.add("No partition mode selected, so the largest-partitions report - the skew signal "
           + "the Statistics tab and export pre-flight both use - will be empty.");
     }
+    if (spec.operation() == DsbulkOperation.COUNT) {
+      // Cost visibility (plan section 5.4). A count is not a metadata lookup: there is no stored
+      // row count in Cassandra, so every row of the table is read off disk on every replica set.
+      // Saying so before the job starts is the difference between an informed click and an
+      // accidental cluster-wide scan.
+      warnings.add(countCost(spec, probe));
+    }
+    if (spec.operation() == DsbulkOperation.COUNT
+        && DsbulkDefaults.normaliseStatsModes(spec.statsModes()).contains("partitions")
+        && !probe.hasClusteringKey()) {
+      warnings.add("The 'partitions' statistics mode needs a clustering column: DSBulk counts rows "
+          + "per partition with a GROUP BY over the partition key, which on a table whose partition "
+          + "IS the row can only ever report 1. This table has no clustering column, so the mode is "
+          + "refused rather than run to produce a table of ones.");
+    }
     return List.copyOf(warnings);
+  }
+
+  /** The sentence that appears next to the Recalculate button, with numbers where we have them. */
+  static String countCost(DsbulkJobSpec spec, DsbulkProbe probe) {
+    StringBuilder text = new StringBuilder("A count reads EVERY row of ")
+        .append(spec.qualifiedName())
+        .append(" - Cassandra stores no row count, so there is no cheap answer. ");
+    if (probe.estimatedRows() != null) {
+      text.append("The last count saw roughly ").append(probe.estimatedRows()).append(" rows. ");
+    }
+    text.append("Expect a full scan across ")
+        .append(probe.nodeCount())
+        .append(probe.nodeCount() == 1 ? " node" : " nodes")
+        .append(" at LOCAL_ONE, competing with production reads for the same page cache.");
+    return text.toString();
   }
 }

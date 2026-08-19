@@ -85,7 +85,7 @@ class SchemaSupportTest {
     assertThat(store.find("conn-1", "demo", "users")).isEmpty();
 
     TableStatistics statistics =
-        new TableStatistics(
+        TableStatistics.untruncated(
             SchemaIdentity.table("demo", "users"),
             10_000_000L,
             250_000L,

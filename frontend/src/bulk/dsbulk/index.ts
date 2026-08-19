@@ -7,9 +7,9 @@
  *  1. Route + nav entry for the load flow, rendering `<LoadJobForm connectionId={…} />` with the
  *     active connection id, and a "Load data" action on the schema-tree table context menu that
  *     pre-fills `keyspace`/`table`.
- *  2. Statistics tab (plan §4) rendering `<CountStatisticsView statistics={…} />` from
- *     `GET /api/connections/{id}/keyspaces/{ks}/tables/{t}/statistics`, with a "Recalculate"
- *     action posting a `CountJobRequest` via `useCreateCountJob`.
+ *  2. DONE — `src/routes/StatisticsPage.tsx` renders `<CountStatisticsView />` from
+ *     `GET /api/connections/{id}/keyspaces/{ks}/tables/{t}/statistics` and posts a
+ *     `CountJobRequest` via `useCreateCountJob`, behind a cost confirmation (plan §5.4).
  *  3. Job progress: `createLoadJob`/`createCountJob` return a queued `Job`; subscribe to
  *     `/api/jobs/{id}/events` with `src/api/sse.ts` and surface it in the jobs panel.
  *  4. Job templates: `listJobTemplates` / `createJobTemplate` are implemented here but no UI owns

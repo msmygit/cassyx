@@ -92,4 +92,31 @@ describe('CountStatisticsView', () => {
     expect(screen.getByText('biggest-partitions')).toBeInTheDocument();
     expect(screen.queryByTestId('partition-count')).not.toBeInTheDocument();
   });
+
+  it('hides the partitions tile when the server reports no total — it does not invent one', () => {
+    // DSBulk has no total-partitions figure. The field used to carry the size of the top-N list, so
+    // the tile read "10" on every table that had ever been counted.
+    renderWithProviders(
+      <CountStatisticsView statistics={{ ...STATISTICS, partitionCount: null }} />,
+    );
+    expect(screen.queryByTestId('partition-count')).not.toBeInTheDocument();
+    expect(screen.getByTestId('total-rows')).toHaveTextContent('10 000 000');
+  });
+
+  it('says a section was capped instead of silently showing a short list', () => {
+    renderWithProviders(
+      <CountStatisticsView
+        statistics={{
+          ...STATISTICS,
+          perTokenRangeTruncated: true,
+          perTokenRangeReported: 3072,
+          perReplicaTruncated: false,
+          perReplicaReported: 2,
+        }}
+      />,
+    );
+
+    expect(screen.getByTestId('per-token-range-truncated')).toHaveTextContent('3072');
+    expect(screen.queryByTestId('per-replica-truncated')).not.toBeInTheDocument();
+  });
 });

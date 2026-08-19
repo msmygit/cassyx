@@ -32,14 +32,27 @@ public final class TokenRangeCountEngine implements CountEngine {
 
   private final TokenRangeSplitter splitter;
   private final int topPartitions;
+  private final boolean tokenRangeScan;
 
   public TokenRangeCountEngine() {
-    this(new EvenTokenRangeSplitter(), DEFAULT_TOP_PARTITIONS);
+    this(new EvenTokenRangeSplitter(), DEFAULT_TOP_PARTITIONS, true);
   }
 
   public TokenRangeCountEngine(TokenRangeSplitter splitter, int topPartitions) {
+    this(splitter, topPartitions, true);
+  }
+
+  /**
+   * @param tokenRangeScan false on a target that does not implement {@code token()} range scans
+   *     (Amazon Keyspaces, plan section 7.1). The driver still publishes a token map there, so the
+   *     decision cannot be inferred from its presence - a range-predicated query would be built and
+   *     then rejected by the server. False takes the plain-paging path instead.
+   */
+  public TokenRangeCountEngine(
+      TokenRangeSplitter splitter, int topPartitions, boolean tokenRangeScan) {
     this.splitter = splitter;
     this.topPartitions = topPartitions;
+    this.tokenRangeScan = tokenRangeScan;
   }
 
   @Override
@@ -55,11 +68,13 @@ public final class TokenRangeCountEngine implements CountEngine {
         metadata.getPartitionKey().stream().map(c -> c.getName().asInternal()).toList();
 
     List<TokenRange> ranges =
-        session
-            .getMetadata()
-            .getTokenMap()
-            .map(map -> splitter.split(map.getTokenRanges(), map.getTokenRanges().size()))
-            .orElse(List.of());
+        !tokenRangeScan
+            ? List.of()
+            : session
+                .getMetadata()
+                .getTokenMap()
+                .map(map -> splitter.split(map.getTokenRanges(), map.getTokenRanges().size()))
+                .orElse(List.of());
 
     if (ranges.isEmpty()) {
       // Keyspaces / no token map: one plain aggregate, accepting the coordinator cost.

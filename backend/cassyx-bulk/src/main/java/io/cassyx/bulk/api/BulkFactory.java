@@ -66,6 +66,18 @@ public final class BulkFactory {
     return new TokenRangeCountEngine();
   }
 
+  /**
+   * Native count for a target that cannot do {@code token()} range scans (plan section 7.1).
+   *
+   * <p>This is the only reason the native count engine is reachable from outside the module: on
+   * Amazon Keyspaces the DSBulk {@code count} workflow has no usable plan, so a {@code global}
+   * count degrades to one plain aggregate rather than being refused. Every other statistics mode is
+   * genuinely unavailable there and is rejected rather than quietly downgraded.
+   */
+  public static CountEngine pagingCountEngine() {
+    return new TokenRangeCountEngine(tokenRangeSplitter(), 10, false);
+  }
+
   /** The oversplit + {@code unwrap()} splitter, exposed for pre-flight estimates and tests. */
   public static TokenRangeSplitter tokenRangeSplitter() {
     return new EvenTokenRangeSplitter();

@@ -54,6 +54,47 @@ quiescent.
      `s3://`. Today the spec implies a `dsbulk.s3.region` config key that DSBulk silently ignores.
    - Keep `s3.clientCacheSize` as the only member of the `s3` settings group.
 
+## DSBulk count - needs contract
+
+`openapi/cassyx-api.yaml` is owned by another workstream, so the statistics work landed against the
+CURRENT contract and these additions are owed. Everything below is **additive** - no published
+field changed meaning, and no shipped response violates the spec as written (neither
+`TableStatistics` nor the count endpoint declares `additionalProperties: false`).
+
+1. **Four optional `TableStatistics` fields, already emitted by the server.** The `perTokenRange`
+   and `perReplica` sections are capped server-side at 500 rows
+   (`DsbulkDtos.TableStatistics.MAX_DETAIL_ROWS`), ranked by row count before the cut. A 12-node
+   cluster with 256 vnodes reports roughly 3000 token ranges, most of them empty; returning all of
+   them is a large response and a table nobody can read. The cap has to be visible or a shortened
+   list is indistinguishable from a small cluster:
+   - `perTokenRangeTruncated: boolean`, `perTokenRangeReported: integer`
+   - `perReplicaTruncated: boolean`, `perReplicaReported: integer`
+
+   The frontend declares them locally in `CountStatisticsView.tsx` until the schema catches up.
+
+2. **`partitionCount` is now always `null` for a DSBulk-sourced snapshot.** The field stays (it is
+   already typed `[integer, "null"]`); only its description needs correcting. DSBulk's `count`
+   workflow reports the top-N largest partitions and no total partition count. The old value was
+   `largestPartitions().size()`, i.e. the top-N cap - every table in the world had exactly 10
+   partitions. The example value `250000` should be dropped or marked as native-engine-only.
+
+3. **`422` on `POST /api/connections/{id}/jobs/count`.** Two request/cluster combinations are
+   refused up front rather than failing inside the child process minutes after the 202:
+   - `partitions` on a table with no clustering column (DSBulk throws at workflow init);
+   - `ranges` / `hosts` / `partitions` on a target with no `token()` range scan, i.e. Amazon
+     Keyspaces (plan §7.1). `global` is NOT refused there - it falls back to the native paging
+     engine.
+
+   The problem body is `type: https://cassyx.dev/problems/count-mode-unsupported` with an extension
+   member `modes: [string]` naming exactly what was refused, so the client can retry with the rest.
+
+4. **Worth knowing, not a contract change:** a Keyspaces `global` count runs on the native engine
+   but its `cassyx_job` row still records `engine='DSBULK'`, because that is what routes
+   cancellation to the service owning the future. The settings document records
+   `"engine": "NATIVE"` and the SSE `status` message says so. If the `engine` column ever gains a
+   `NATIVE` value for these rows, cancellation routing in `JobService.requestCancel` must move
+   with it.
+
 ### Known-broken at time of writing (each owned by an in-flight workstream)
 - cassyx-core: 2 checkstyle violations (workstream C) block `mvn verify` for everyone.
 - cassyx-api Spring context: workstream A's `ConnectionSessionService` has no default constructor,
