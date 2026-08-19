@@ -53,6 +53,31 @@ say "backend: GET /api/health (contract requires status AND version)"
 check_field "/api/health returns status"  "$API/api/health" "status"
 check_field "/api/health returns version" "$API/api/health" "version"
 
+# Release-only, opt-in: assert the running image reports the version the tag
+# promises. The tag/pom guard (scripts/release-version.sh) proves the SOURCE
+# agreed before the build; this proves the BUILT ARTEFACT agrees after it, which
+# is the claim that actually reaches customers. They are different failures: a
+# stale build cache or a botched jar copy passes the first and fails this one.
+# Unset in normal `make smoke` runs, so dev behaviour is unchanged.
+if [ -n "${CASSYX_SMOKE_EXPECT_VERSION:-}" ]; then
+  say "release: /api/health reports version ${CASSYX_SMOKE_EXPECT_VERSION}"
+  reported="$(curl -fsS "$API/api/health" 2>/dev/null \
+    | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+  if [ "$reported" = "$CASSYX_SMOKE_EXPECT_VERSION" ]; then
+    pass "reported version is $reported"
+  else
+    fail "version mismatch - tag says '$CASSYX_SMOKE_EXPECT_VERSION', image reports '${reported:-<none>}'"
+    printf "    Nothing in the build injects the reactor version into the running app:\n"
+    printf "    HealthController and LicenseController both read \${cassyx.version:0.1.0-SNAPSHOT},\n"
+    printf "    that property is defined nowhere, and the jar manifest carries no\n"
+    printf "    Implementation-Version, so the default always wins. §9.5 scope is derived\n"
+    printf "    from this string, so it currently parses to major 0 (treated as unscoped).\n"
+    printf "    Fix in backend/pom.xml: enable resource filtering and set\n"
+    printf "    'cassyx.version: @project.version@' in application.yml, or bind the\n"
+    printf "    spring-boot-maven-plugin build-info goal.\n"
+  fi
+fi
+
 # The UI calls this before rendering anything at all. A 404 here is
 # indistinguishable to the user from the entire product being down.
 say "backend: GET /api/license (first call the UI makes; ungated per §9.1)"

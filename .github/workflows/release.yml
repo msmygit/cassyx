@@ -1,0 +1,387 @@
+# =============================================================================
+# cassyx release - the only thing that hands the product to a customer.
+#
+#   v1.2.3  ->  ghcr.io/<owner>/cassyx-backend  : 1.2.3, 1.2, 1, latest
+#               ghcr.io/<owner>/cassyx-frontend : 1.2.3, 1.2, 1, latest
+#               a GitHub Release with generated notes
+#
+# Shape, and why:
+#
+#   guard    Refuses to go further if the tag and backend/pom.xml disagree. First,
+#            fast, and fatal - see scripts/release-version.sh for why a mismatch
+#            is a licensing correctness bug rather than untidiness.
+#
+#   release  Build -> RUN -> smoke -> only then push. Tags are cut from main,
+#            which has already passed the full CI suite (§11.1), so this does not
+#            re-run tests; re-testing an already-tested commit is not what is
+#            missing. What is missing is proof that the IMAGES boot and serve, and
+#            the only honest way to get it is to start the stack and ask it. The
+#            amd64 images are built and `--load`ed, run through
+#            docker-compose.release.yml (the customer's file, not the dev one) and
+#            checked with scripts/smoke.sh (the same gate CI uses). A failure here
+#            means nothing is published - the registry never sees a broken tag,
+#            which beats yanking one afterwards.
+#
+#            The multi-arch push then rebuilds from the GHA layer cache written by
+#            the verification build, so amd64 is a cache hit and only arm64 is new
+#            work.
+#
+# `latest` deliberately does NOT move for a prerelease. docker/metadata-action's
+# `latest=auto` plus the semver patterns handle that: v1.2.3-rc1 publishes only
+# `1.2.3-rc1`, and the rolling 1.2 / 1 / latest tags are left pointing at the last
+# stable release. Someone running `:latest` must never be silently upgraded onto
+# a release candidate.
+#
+# workflow_dispatch is a DRY RUN: it builds, boots and smokes exactly as above,
+# and pushes nothing. Use it to check this pipeline without burning a version
+# number.
+# =============================================================================
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+# Releases are not interchangeable with one another, so a second tag must not
+# cancel the first one's publish half-done.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  DOCKER_BUILDKIT: "1"
+  CASSYX_NO_OPEN: "1"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # The tag must name the version that will actually be built (§9.5).
+  # Its own job so the failure is unmissable in the checks list rather than
+  # buried in the first step of a 40-minute build.
+  # ---------------------------------------------------------------------------
+  guard:
+    name: guard (tag == backend/pom.xml version)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Resolve and verify the version
+        id: v
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            # Dry run: there is no tag to contradict, so just report the pom version.
+            version="$(bash scripts/release-version.sh)"
+            echo "dry run - building version $version from backend/pom.xml"
+          else
+            version="$(bash scripts/release-version.sh "${{ github.ref_name }}")"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          # A hyphen after the patch component is semver's prerelease marker
+          # (1.2.3-rc1). Used only for the GitHub Release flag; the image tags are
+          # decided by metadata-action's own semver handling.
+          if [[ "$version" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "### Releasing \`$version\`" >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  release:
+    name: build · smoke · publish
+    needs: guard
+    runs-on: ubuntu-latest
+    # The arm64 leg of the backend build runs the whole Maven reactor under QEMU
+    # (backend/Dockerfile builds in-image by design, §2.2). That is slow. If it
+    # ever outgrows this budget the fix is a native arm64 runner plus a
+    # digest-merge job, not a bigger number.
+    timeout-minutes: 120
+    permissions:
+      contents: write # create the GitHub Release
+      packages: write # push to ghcr.io
+    env:
+      VERSION: ${{ needs.guard.outputs.version }}
+      REGISTRY: ghcr.io
+      BACKEND_IMAGE: ghcr.io/${{ github.repository_owner }}/cassyx-backend
+      FRONTEND_IMAGE: ghcr.io/${{ github.repository_owner }}/cassyx-frontend
+      # Dry runs build and boot everything but publish nothing.
+      PUSH: ${{ github.event_name != 'workflow_dispatch' }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # QEMU is what makes linux/arm64 buildable on an amd64 runner. A large
+      # share of this product's users are on Apple Silicon, and an amd64-only
+      # image would run their database tooling under emulation on every query.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      # The docker-container driver, not the default docker one: multi-platform
+      # builds and type=gha caching both require it.
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # -----------------------------------------------------------------------
+      # Tag strategy. From v1.2.3: 1.2.3, 1.2, 1, latest.
+      # metadata-action skips the rolling {{major}}.{{minor}} / {{major}} tags for
+      # prereleases automatically, and `latest=auto` withholds `latest` from them
+      # too, which is exactly the required behaviour.
+      # -----------------------------------------------------------------------
+      - name: Image metadata (backend)
+        id: meta-backend
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.BACKEND_IMAGE }}
+          flavor: latest=auto
+          # The `type=raw,value=dryrun` line is for workflow_dispatch: a dispatch
+          # run has no tag, so the semver patterns yield nothing and
+          # build-push-action would be handed an empty tag list. It is never
+          # pushed (PUSH is false for dispatch); it just keeps the dry run
+          # buildable. NB: these lines are a literal block scalar, so a `#`
+          # comment inside it would be fed to metadata-action as a tag.
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=dryrun,enable=${{ github.event_name == 'workflow_dispatch' }}
+          labels: |
+            org.opencontainers.image.title=cassyx backend
+            org.opencontainers.image.description=cassyx - self-hosted Cassandra/DSE/Astra data manager (API and engine)
+            org.opencontainers.image.licenses=Elastic-2.0
+            org.opencontainers.image.version=${{ env.VERSION }}
+
+      - name: Image metadata (frontend)
+        id: meta-frontend
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.FRONTEND_IMAGE }}
+          flavor: latest=auto
+          # The `type=raw,value=dryrun` line is for workflow_dispatch: a dispatch
+          # run has no tag, so the semver patterns yield nothing and
+          # build-push-action would be handed an empty tag list. It is never
+          # pushed (PUSH is false for dispatch); it just keeps the dry run
+          # buildable. NB: these lines are a literal block scalar, so a `#`
+          # comment inside it would be fed to metadata-action as a tag.
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=dryrun,enable=${{ github.event_name == 'workflow_dispatch' }}
+          labels: |
+            org.opencontainers.image.title=cassyx frontend
+            org.opencontainers.image.description=cassyx - self-hosted Cassandra/DSE/Astra data manager (web UI)
+            org.opencontainers.image.licenses=Elastic-2.0
+            org.opencontainers.image.version=${{ env.VERSION }}
+
+      # =======================================================================
+      # 1. BUILD FOR VERIFICATION - host arch only, loaded into the local daemon.
+      #    Nothing leaves the runner yet.
+      # =======================================================================
+      - name: Build backend (amd64, local)
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          platforms: linux/amd64
+          load: true
+          tags: ${{ env.BACKEND_IMAGE }}:verify
+          # THE licence-enforcement build arg. `release` bakes
+          # cassyx.license.bypass-allowed=false, so a published image cannot be
+          # unlocked by setting CASSYX_LICENSE_ENFORCE=false - which is the whole
+          # difference between selling the product and giving it away. Passed
+          # explicitly rather than relying on the Dockerfile default, because a
+          # default that silently changes is not a control.
+          #
+          # NOTE: this ARG arrives with the feat/site-licence branch. Until that
+          # merges, backend/Dockerfile declares no such ARG and it is simply
+          # ignored (verified locally: buildx does not even warn, and the build
+          # exits 0). Wiring it now means the release pipeline is correct the
+          # moment the branch lands rather than one forgotten edit later.
+          build-args: |
+            CASSYX_BYPASS_PROFILE=release
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,scope=backend,mode=max
+
+      - name: Build frontend (amd64, local)
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          platforms: linux/amd64
+          load: true
+          tags: ${{ env.FRONTEND_IMAGE }}:verify
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,scope=frontend,mode=max
+
+      # =======================================================================
+      # 2. RUN WHAT WE BUILT, using the file the customer will use.
+      #    This exercises docker-compose.release.yml itself, so a mistake in the
+      #    thing users download fails the release rather than their evening.
+      # =======================================================================
+      # Exported via $GITHUB_ENV rather than a step-level `env:` block because the
+      # teardown and log steps below ALSO interpolate the compose file, and
+      # CASSYX_SECRET_KEY is declared `:?` there - without it in the environment
+      # even `docker compose down` would fail. Shell environment beats .env in
+      # compose interpolation, so these override the shipped example
+      # unambiguously rather than relying on last-key-wins inside the file.
+      - name: Prepare the release-stack environment
+        run: |
+          set -euo pipefail
+          # Copied verbatim, so a syntax error in the file customers download
+          # fails the release here rather than on their first install.
+          cp .env.release.example .env
+          {
+            # The compose file refuses to start without a real key, by design.
+            echo "CASSYX_SECRET_KEY=$(openssl rand -base64 32)"
+            echo "CASSYX_VERSION=verify"
+            echo "CASSYX_IMAGE_OWNER=${{ github.repository_owner }}"
+            # Enforcement OFF for the smoke run only. The IMAGE is still built
+            # with the release bypass profile above; this keeps the check focused
+            # on "does it boot and serve" rather than on licence state.
+            echo "CASSYX_LICENSE_ENFORCE=false"
+            echo "CASSYX_COMPOSE_FILE=docker-compose.release.yml"
+          } >> "$GITHUB_ENV"
+
+      - name: Boot the release stack
+        run: |
+          set -euo pipefail
+          docker compose -f docker-compose.release.yml up -d
+          bash scripts/wait-for-health.sh backend 300
+          bash scripts/wait-for-health.sh frontend 120
+
+      # The same script `make smoke` and the CI smoke job run - one gate, not a
+      # second implementation that can drift from it. The extra expectation is
+      # release-specific: the built artefact must report the tagged version.
+      - name: Smoke the release stack
+        env:
+          CASSYX_SMOKE_API: http://localhost:8081
+          CASSYX_SMOKE_WEB: http://localhost:8080
+          CASSYX_SMOKE_EXPECT_VERSION: ${{ env.VERSION }}
+        run: bash scripts/smoke.sh
+
+      - name: Stack logs on failure
+        if: failure()
+        timeout-minutes: 2
+        run: docker compose -f docker-compose.release.yml logs --tail=200 || true
+
+      - name: Tear down the verification stack
+        if: always()
+        run: docker compose -f docker-compose.release.yml down --volumes --remove-orphans || true
+
+      # =======================================================================
+      # 3. PUBLISH - only now, and only because step 2 passed.
+      # =======================================================================
+      # `success() &&` is written out rather than left implicit. GitHub does add
+      # an implicit success() to a plain `if:`, but "nothing is published unless
+      # the smoke check passed" is the one property this whole workflow exists to
+      # guarantee, and it should not rest on a reader knowing that rule.
+      - name: Log in to GHCR
+        if: success() && env.PUSH == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # provenance + SBOM come free from build-push-action (buildx attaches them
+      # to the image index), so `docker buildx imagetools inspect` can answer
+      # "what is in this image and where did it come from" without a separate
+      # scanning job. mode=max records the full build definition, not just the
+      # materials.
+      - name: Push backend (linux/amd64, linux/arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          platforms: linux/amd64,linux/arm64
+          push: ${{ env.PUSH == 'true' }}
+          tags: ${{ steps.meta-backend.outputs.tags }}
+          labels: ${{ steps.meta-backend.outputs.labels }}
+          build-args: |
+            CASSYX_BYPASS_PROFILE=release
+          provenance: mode=max
+          sbom: true
+          # amd64 is already in this cache from the verification build above, so
+          # only the arm64 leg is real work here.
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,scope=backend,mode=max
+
+      - name: Push frontend (linux/amd64, linux/arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          platforms: linux/amd64,linux/arm64
+          push: ${{ env.PUSH == 'true' }}
+          tags: ${{ steps.meta-frontend.outputs.tags }}
+          labels: ${{ steps.meta-frontend.outputs.labels }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,scope=frontend,mode=max
+
+      # =======================================================================
+      # 4. The GitHub Release. Last, so it never advertises images that failed
+      #    to publish.
+      # =======================================================================
+      - name: Create the GitHub Release
+        if: success() && env.PUSH == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          PRERELEASE: ${{ needs.guard.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          cat > /tmp/release-notes.md <<EOF
+          ## Install
+
+          \`\`\`bash
+          curl -fsSLO https://raw.githubusercontent.com/${{ github.repository }}/${TAG}/docker-compose.release.yml
+          curl -fsSL  https://raw.githubusercontent.com/${{ github.repository }}/${TAG}/.env.release.example -o .env
+          # set CASSYX_SECRET_KEY (openssl rand -base64 32) and CASSYX_LICENSE_KEY in .env
+          echo "CASSYX_VERSION=${VERSION}" >> .env
+          docker compose -f docker-compose.release.yml up -d
+          \`\`\`
+
+          Then open <http://localhost:8080>.
+
+          ### Images (linux/amd64 · linux/arm64)
+
+          - \`${BACKEND_IMAGE}:${VERSION}\`
+          - \`${FRONTEND_IMAGE}:${VERSION}\`
+          EOF
+          # An array, not $(... && echo --prerelease): that idiom expands to an
+          # empty word under some shells and is invisible when it misfires.
+          # An `if`, not `[ ... ] && flags+=(...)`: under `set -e` that list exits
+          # the script whenever the test is false, i.e. on every stable release.
+          flags=()
+          if [ "$PRERELEASE" = "true" ]; then flags+=(--prerelease); fi
+          gh release create "$TAG" \
+            --title "cassyx $VERSION" \
+            --generate-notes \
+            --notes-file /tmp/release-notes.md \
+            "${flags[@]}"
+
+      - name: Summary
+        if: always()
+        env:
+          BACKEND_TAGS: ${{ steps.meta-backend.outputs.tags }}
+          FRONTEND_TAGS: ${{ steps.meta-frontend.outputs.tags }}
+        run: |
+          set -euo pipefail
+          # The metadata-action outputs are newline-separated; flatten them or the
+          # step summary renders as broken table rows.
+          {
+            echo "| image | tags |"
+            echo "| --- | --- |"
+            echo "| \`${BACKEND_IMAGE}\` | $(echo "$BACKEND_TAGS" | tr '\n' ' ') |"
+            echo "| \`${FRONTEND_IMAGE}\` | $(echo "$FRONTEND_TAGS" | tr '\n' ' ') |"
+            echo ""
+            echo "pushed: \`${PUSH}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,117 @@
+# =============================================================================
+# cassyx - RELEASE stack. Runs published images; builds nothing.
+#
+# This is the file a paying customer gets. `docker-compose.yml` in the repo root
+# is the DEVELOPMENT stack: it has `build:` stanzas, so it needs a full source
+# checkout and pulls a Maven/Node toolchain on first run. Nobody who bought the
+# product should have to do that.
+#
+# Everything needed is two files, no checkout, no toolchain:
+#
+#   curl -fsSLO https://raw.githubusercontent.com/msmygit/cassyx/main/docker-compose.release.yml
+#   curl -fsSL  https://raw.githubusercontent.com/msmygit/cassyx/main/.env.release.example -o .env
+#   # edit .env: set CASSYX_SECRET_KEY (and CASSYX_LICENSE_KEY once you have one)
+#   docker compose -f docker-compose.release.yml up -d
+#
+# then open http://localhost:8080.
+#
+# NO Cassandra service here, deliberately. cassyx is a manager FOR your existing
+# clusters (§3): you register connections in the UI - Cassandra, DSE or Astra,
+# wherever they already run. The dev compose ships a throwaway Cassandra 5.x only
+# because the test suite and the demo seed need one. Bundling a database with the
+# release stack would imply cassyx stores your data, which it does not.
+#
+# Pin a version rather than riding `latest` for anything you care about:
+#   CASSYX_VERSION=1.0.0 docker compose -f docker-compose.release.yml up -d
+# =============================================================================
+
+name: ${COMPOSE_PROJECT_NAME:-cassyx}
+
+services:
+  # ---------------------------------------------------------------------------
+  # API + engine (Spring Boot 3.5 / Java 21). Multi-arch: amd64 and arm64, so
+  # this runs natively on Apple Silicon rather than crawling under emulation.
+  # ---------------------------------------------------------------------------
+  backend:
+    image: ghcr.io/${CASSYX_IMAGE_OWNER:-msmygit}/cassyx-backend:${CASSYX_VERSION:-latest}
+    container_name: ${COMPOSE_PROJECT_NAME:-cassyx}-backend
+    ports:
+      # Bound to loopback by DEFAULT. The SPA never uses this port (nginx proxies
+      # /api internally); it exists for curl, Swagger and scripting. Publishing
+      # the ungated API on 0.0.0.0 out of the box would be a poor default, so
+      # widening it is an explicit choice: CASSYX_API_BIND=0.0.0.0.
+      - "${CASSYX_API_BIND:-127.0.0.1}:${CASSYX_API_PORT:-8081}:8080"
+    environment:
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-docker}
+      CASSYX_DATA_DIR: /data
+      # Encrypts cluster credentials at rest (§3). REQUIRED and deliberately not
+      # defaulted: a shipped default key would mean every install on earth
+      # encrypts its Cassandra passwords with a key that is public knowledge.
+      # Quoted: the message contains ": ", which YAML would otherwise read as a
+      # nested mapping and reject the whole file.
+      CASSYX_SECRET_KEY: "${CASSYX_SECRET_KEY:?set CASSYX_SECRET_KEY in .env (generate one with: openssl rand -base64 32)}"
+      # Enforcement defaults to ON here, unlike the dev stack. This is the paid
+      # product (§9.1); an unlicensed instance shows the activation/purchase
+      # screen. Site-licence deployments flip this in their own .env (§9.2), and
+      # the UI keeps the bypass banner visible so that is never mistaken for paid.
+      CASSYX_LICENSE_ENFORCE: ${CASSYX_LICENSE_ENFORCE:-true}
+      CASSYX_LICENSE_KEY: ${CASSYX_LICENSE_KEY:-}
+      # Billing is a hosted-storefront concern; a self-hosted install talks to
+      # the storefront, it does not hold Stripe keys.
+      CASSYX_BILLING_ENABLED: ${CASSYX_BILLING_ENABLED:-false}
+      JAVA_TOOL_OPTIONS: ${JAVA_TOOL_OPTIONS:--XX:MaxRAMPercentage=75}
+    networks:
+      default:
+        aliases:
+          # The frontend image bakes nginx.conf, which proxies to the upstream
+          # `cassyx-api`. Same alias as the dev stack, so one nginx image serves
+          # both and the frontend workstream stays unaware of compose naming.
+          - cassyx-api
+    volumes:
+      # Named volumes, not bind mounts: the container runs as uid 10001, and a
+      # host directory created by `docker compose up` would land root-owned and
+      # break the first write. Retrieve exports with, e.g.
+      #   docker compose -f docker-compose.release.yml cp backend:/out ./out
+      - cassyx-data:/data
+      - cassyx-out:/out
+    healthcheck:
+      # 127.0.0.1, not localhost: see the frontend note below.
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/api/health >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+    # In-flight bulk jobs get a chance to cancel cleanly rather than being killed.
+    stop_grace_period: 60s
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # nginx serving the SPA and proxying /api (SSE-safe, buffering off).
+  # THE port a human opens.
+  # ---------------------------------------------------------------------------
+  frontend:
+    image: ghcr.io/${CASSYX_IMAGE_OWNER:-msmygit}/cassyx-frontend:${CASSYX_VERSION:-latest}
+    container_name: ${COMPOSE_PROJECT_NAME:-cassyx}-frontend
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${CASSYX_WEB_PORT:-8080}:8080"
+    healthcheck:
+      # 127.0.0.1, NOT localhost. In this image `localhost` resolves to ::1 first and
+      # nginx listens on 0.0.0.0 only, so the IPv6 attempt is refused and the container
+      # never reports healthy even though it is serving fine.
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  # The H2 store: your registered connections, saved scripts, query history,
+  # job records and licence. Losing this loses your setup, not your cluster data.
+  cassyx-data:
+  # Export sinks and job artefacts, so bulk data never round-trips through the
+  # browser (§2).
+  cassyx-out:

@@ -358,3 +358,53 @@ check-backend-src:
 	@$(PREFLIGHT) docker env backend-src
 check-frontend-src:
 	@$(PREFLIGHT) docker env frontend-src
+
+# =============================================================================
+# Release (plan §10). The pipeline itself is .github/workflows/release.yml;
+# these targets are the parts of it a maintainer can run locally, so a release
+# is never the first time the sequence executes.
+#
+# `release-local` is deliberately the SAME sequence the workflow runs - build,
+# boot from the customer's compose file, smoke - just at host architecture and
+# without pushing. If it fails here it would have failed there.
+# =============================================================================
+.PHONY: release-version release-local release-down
+
+DC_RELEASE   := docker compose -f $(ROOT)/docker-compose.release.yml
+# The GHCR namespace. Only differs for a fork or an internal mirror.
+IMAGE_OWNER  := $(shell echo $${CASSYX_IMAGE_OWNER:-msmygit})
+REL_BACKEND  := ghcr.io/$(IMAGE_OWNER)/cassyx-backend
+REL_FRONTEND := ghcr.io/$(IMAGE_OWNER)/cassyx-frontend
+
+release-version: ## Print the reactor version; with TAG=v1.2.3 assert the tag matches it
+	@bash $(ROOT)/scripts/release-version.sh $(TAG)
+
+release-local: ## Dry-run the release: build both images, run docker-compose.release.yml, smoke
+	@$(PREFLIGHT) docker backend frontend
+	$(call say,version guard - tag/pom agreement (§9.5))
+	@bash $(ROOT)/scripts/release-version.sh $(TAG) >/dev/null
+	$(call say,building release images at host architecture)
+	@# --build-arg CASSYX_BYPASS_PROFILE=release is what stops a published image
+	@# from being unlocked with CASSYX_LICENSE_ENFORCE=false. It arrives with the
+	@# feat/site-licence branch; until then backend/Dockerfile declares no such
+	@# ARG and buildx silently ignores it, which is expected and forward-compatible.
+	@docker buildx build --load --build-arg CASSYX_BYPASS_PROFILE=release \
+	    -t $(REL_BACKEND):local $(ROOT)/backend
+	@docker buildx build --load -t $(REL_FRONTEND):local $(ROOT)/frontend
+	$(call say,starting the stack from docker-compose.release.yml (no build: stanzas))
+	@CASSYX_VERSION=local CASSYX_IMAGE_OWNER=$(IMAGE_OWNER) \
+	 CASSYX_LICENSE_ENFORCE=false \
+	 CASSYX_SECRET_KEY="$$(openssl rand -base64 32)" \
+	 $(DC_RELEASE) up -d
+	@CASSYX_COMPOSE_FILE=$(ROOT)/docker-compose.release.yml \
+	 CASSYX_SECRET_KEY=unused $(WAIT) backend 300
+	@CASSYX_COMPOSE_FILE=$(ROOT)/docker-compose.release.yml \
+	 CASSYX_SECRET_KEY=unused $(WAIT) frontend 120
+	$(call say,smoke - the same gate CI and `make smoke` run)
+	@CASSYX_SMOKE_EXPECT_VERSION="$$(bash $(ROOT)/scripts/release-version.sh)" \
+	 bash $(ROOT)/scripts/smoke.sh
+	@printf "\n\033[32m✓ release-local passed.\033[0m Stack is still up on $(APP_URL) - 'make release-down' to clean up.\n\n"
+
+release-down: ## Stop the release stack and remove its volumes
+	$(call say,stopping the release stack)
+	@CASSYX_SECRET_KEY=unused $(DC_RELEASE) down --volumes --remove-orphans

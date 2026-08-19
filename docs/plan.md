@@ -926,6 +926,44 @@ testing across the target matrix (§7.1), and E2E/perf benchmarking.
 6. Report honestly: paste real command output. A workstream reported green that is not green costs
    more than one reported blocked.
 
+### Phase 3 - shipping
+
+Building the product and *delivering* it are separate problems, and only the first was specified
+above. `docker-compose.yml` builds both images from source, which is right for §2.2's clean-checkout
+promise and wrong for everyone who bought the thing: a customer would need a source checkout and a
+toolchain to run a binary they paid for.
+
+Delivery is therefore two artefacts and one pipeline:
+
+| Artefact | Purpose |
+| --- | --- |
+| `ghcr.io/<owner>/cassyx-backend`, `…/cassyx-frontend` | Published images, **linux/amd64 + linux/arm64**. Apple Silicon is too common in this audience for an amd64-only image; emulating a database tool's JVM is not a defensible default. |
+| `docker-compose.release.yml` + `.env.release.example` | The pull-based stack. No `build:` stanzas, no bundled Cassandra (cassyx manages *your* clusters, §3). Two files, Docker, nothing else. |
+
+`.github/workflows/release.yml` fires on a pushed `v*` tag: **guard → build → boot → smoke → push →
+GitHub Release**. Three things about it are load-bearing:
+
+1. **The tag must equal `<version>` in `backend/pom.xml`**, enforced by `scripts/release-version.sh`
+   before anything is built. The reactor version is what `/api/health` reports and what licence
+   scope is checked against (§9.5), so a mismatched tag ships an image that makes the wrong
+   licensing decision for every customer. The version is parsed out of the pom (namespace-aware
+   XPath on `/project/version`), not grepped (the file has ~40 other `<version>` elements).
+2. **Verify before publishing, not after.** Tags are cut from `main`, which has already passed the
+   §11.1 suite, so the release does not re-run tests. It runs the thing tests cannot: it builds the
+   images, starts them via `docker-compose.release.yml` (the customer's file, so a mistake there
+   fails the release rather than their evening) and runs `scripts/smoke.sh` against them, plus one
+   release-only assertion that the built artefact reports the tagged version. A registry that never
+   receives a broken tag beats a yank.
+3. **Images are built with `--build-arg CASSYX_BYPASS_PROFILE=release`**, baking
+   `cassyx.license.bypass-allowed=false` so a published image cannot be unlocked with
+   `CASSYX_LICENSE_ENFORCE=false` (§9.2). That is the whole difference between selling the product
+   and giving it away, so it is passed explicitly rather than inherited from a Dockerfile default.
+
+Tag strategy from `v1.2.3`: `1.2.3`, `1.2`, `1`, `latest`. A prerelease (`v1.2.3-rc1`) publishes
+only its exact version; `latest` must never silently move someone onto a release candidate.
+`workflow_dispatch` runs the same pipeline as a dry run and pushes nothing; `make release-local`
+does the same on a laptop.
+
 ---
 
 ## 11. Testing, CI & verification

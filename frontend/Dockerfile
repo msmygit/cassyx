@@ -30,11 +30,26 @@ EXPOSE 5173
 # --host is required for the port to be reachable from outside the container.
 CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "5173"]
 
+# ---------------------------------------------------------------- deps (cross-safe)
+# Same install as `deps`, but pinned to the BUILD platform. Kept separate rather
+# than pinning `deps` itself, because `dev` needs node_modules native to the
+# platform it will RUN on, while `build` only needs them to run the compiler.
+FROM --platform=$BUILDPLATFORM node:22-alpine AS deps-build
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm npm ci --no-audit --no-fund
+
 # --------------------------------------------------------------------------- build
-FROM node:22-alpine AS build
+# Pinned to $BUILDPLATFORM: the release pipeline builds linux/amd64 AND
+# linux/arm64, and without this the arm64 leg runs npm/tsc/vite under QEMU on an
+# amd64 runner: minutes of emulation to produce a bundle that is pure JS/CSS/HTML
+# and therefore byte-identical either way. Only the nginx `runtime` stage below is
+# genuinely per-architecture. (esbuild and rollup ship native binaries; emulating
+# them is also the flakiest part of a cross build.)
+FROM --platform=$BUILDPLATFORM node:22-alpine AS build
 WORKDIR /app
 ENV NODE_ENV=production
-COPY --from=deps /app/node_modules ./node_modules
+COPY --from=deps-build /app/node_modules ./node_modules
 COPY . .
 # VITE_* values are baked in at build time. Default is empty = same-origin, which is what the
 # runtime image below serves (nginx proxies /api to the backend).
@@ -46,7 +61,7 @@ RUN npm run build
 # ------------------------------------------------------------------------- runtime
 FROM nginx:1.27-alpine AS runtime
 LABEL org.opencontainers.image.title="cassyx frontend" \
-      org.opencontainers.image.source="https://github.com/cassyx/cassyx" \
+      org.opencontainers.image.source="https://github.com/msmygit/cassyx" \
       org.opencontainers.image.licenses="LicenseRef-cassyx-commercial"
 
 COPY nginx.conf /etc/nginx/conf.d/default.conf
