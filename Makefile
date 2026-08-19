@@ -385,9 +385,11 @@ release-local: ## Dry-run the release: build both images, run docker-compose.rel
 	@bash $(ROOT)/scripts/release-version.sh $(TAG) >/dev/null
 	$(call say,building release images at host architecture)
 	@# --build-arg CASSYX_BYPASS_PROFILE=release is what stops a published image
-	@# from being unlocked with CASSYX_LICENSE_ENFORCE=false. It arrives with the
-	@# feat/site-licence branch; until then backend/Dockerfile declares no such
-	@# ARG and buildx silently ignores it, which is expected and forward-compatible.
+	@# from being unlocked with CASSYX_LICENSE_ENFORCE=false: the release profile
+	@# bakes cassyx.license.bypass-allowed=false, so the env var is ignored and
+	@# enforcement stays on. backend/Dockerfile defaults to release anyway; passing
+	@# it explicitly keeps the intent visible at the call site rather than relying
+	@# on a default someone could change without noticing this line.
 	@docker buildx build --load --build-arg CASSYX_BYPASS_PROFILE=release \
 	    -t $(REL_BACKEND):local $(ROOT)/backend
 	@docker buildx build --load -t $(REL_FRONTEND):local $(ROOT)/frontend
@@ -400,7 +402,11 @@ release-local: ## Dry-run the release: build both images, run docker-compose.rel
 	 CASSYX_SECRET_KEY=unused $(WAIT) backend 300
 	@CASSYX_COMPOSE_FILE=$(ROOT)/docker-compose.release.yml \
 	 CASSYX_SECRET_KEY=unused $(WAIT) frontend 120
-	$(call say,smoke - the same gate CI and `make smoke` run)
+	@# No backticks in this message: $(call say,...) passes it through a shell printf, so
+	@# `make smoke` would be COMMAND SUBSTITUTION and actually run the dev-stack target
+	@# mid-release. It did, and only went unnoticed because it failed and its output was
+	@# swallowed.
+	$(call say,smoke - the same gate CI and 'make smoke' run)
 	@CASSYX_SMOKE_EXPECT_VERSION="$$(bash $(ROOT)/scripts/release-version.sh)" \
 	 bash $(ROOT)/scripts/smoke.sh
 	@printf "\n\033[32m✓ release-local passed.\033[0m Stack is still up on $(APP_URL) - 'make release-down' to clean up.\n\n"
