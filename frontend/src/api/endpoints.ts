@@ -14,6 +14,7 @@ import type {
   LicenseStatus,
   ScbType,
   SessionState,
+  TrialRequest,
 } from './types';
 
 /* --------------------------------------------------------------------------- license §9 */
@@ -29,10 +30,27 @@ export function activateLicense(
   return client.post<LicenseStatus>('/api/license/activate', request);
 }
 
+/**
+ * `email` pre-fills Stripe Checkout. Pass it whenever the caller already knows one (e.g. an
+ * EXPIRED or UPGRADE_REQUIRED licence retains the original buyer's address) — see
+ * docs/integration-todo.md for the case where none is known yet.
+ */
 export function createCheckoutSession(
+  email?: string,
   client: ApiClient = apiClient,
 ): Promise<CheckoutSessionResponse> {
-  return client.post<CheckoutSessionResponse>('/api/billing/checkout-session', {});
+  return client.post<CheckoutSessionResponse>('/api/billing/checkout-session', {
+    email: email ?? '',
+    quantity: 1,
+  });
+}
+
+/** Requests a 14-day trial key (plan §9.4). Needs egress; 503 means "use /api/license/activate". */
+export function requestTrial(
+  request: TrialRequest,
+  client: ApiClient = apiClient,
+): Promise<LicenseStatus> {
+  return client.post<LicenseStatus>('/api/license/trial', request);
 }
 
 /* ----------------------------------------------------------------------- connections §3 */

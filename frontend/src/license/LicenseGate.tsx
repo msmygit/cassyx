@@ -6,9 +6,14 @@ import Typography from '@mui/material/Typography';
 import Alert from '@mui/material/Alert';
 import Button from '@mui/material/Button';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { activateLicense, createCheckoutSession, fetchLicenseStatus } from '../api/endpoints';
+import {
+  activateLicense,
+  createCheckoutSession,
+  fetchLicenseStatus,
+  requestTrial,
+} from '../api/endpoints';
 import { queryKeys } from '../api/queryClient';
-import type { LicenseStatus } from '../api/types';
+import type { LicenseStatus, TrialRequest } from '../api/types';
 import { CassyxLogo } from '../theme/brand';
 import { ActivationScreen } from './ActivationScreen';
 import { deriveLicenseAccess, LicenseContext, type LicenseContextValue } from './licenseModel';
@@ -59,10 +64,24 @@ export function LicenseGate({ children, statusOverride }: LicenseGateProps) {
     await queryClient.invalidateQueries({ queryKey: queryKeys.license });
   }, [queryClient]);
 
-  const purchase = useCallback(async () => {
-    const session = await createCheckoutSession();
+  const purchase = useCallback(async (email?: string) => {
+    const session = await createCheckoutSession(email);
     globalThis.location.assign(session.url);
   }, []);
+
+  const trialMutation = useMutation({
+    mutationFn: (request: TrialRequest) => requestTrial(request),
+    onSuccess: (next) => {
+      queryClient.setQueryData(queryKeys.license, next);
+    },
+  });
+
+  const startTrial = useCallback(
+    async (request: TrialRequest) => {
+      await trialMutation.mutateAsync(request);
+    },
+    [trialMutation],
+  );
 
   const value = useMemo<LicenseContextValue>(
     () => ({
@@ -84,10 +103,13 @@ export function LicenseGate({ children, statusOverride }: LicenseGateProps) {
   } else if (!access.unlocked) {
     content = (
       <ActivationScreen
+        detail={access.detail}
         onActivate={activate}
         onPurchase={purchase}
-        reason={access.reason}
-        busy={activation.isPending}
+        onStartTrial={startTrial}
+        activateBusy={activation.isPending}
+        trialBusy={trialMutation.isPending}
+        trialError={(trialMutation.error as Error | null) ?? null}
       />
     );
   } else {

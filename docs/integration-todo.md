@@ -122,6 +122,23 @@ Verified against upstream DSBulk `settings.md`, not assumed:
 - **Migration tools** (§8), compat matrix (§7.1), and the perf benchmark that decides
   native-vs-DSBulk routing (§11.2).
 
+## Frontend licensing states — needs backend
+
+Implemented per state derivation and UI in `frontend/src/license/` (plan §9.4/§9.5). One gap found
+along the way that is a backend/contract concern, not something to patch around on the frontend:
+
+- **`CheckoutSessionRequest.email` is a required field**, but the "Purchase a license" CTA is
+  reachable from states where the frontend has no email on file at all — `ABSENT` (first run, no
+  trial started), `MALFORMED`, `INVALID_SIGNATURE`, and the legacy/`UNKNOWN`-state fallback for an
+  older backend. Only `EXPIRED` and `UPGRADE_REQUIRED` retain a `status.email` to pre-fill.
+  `ActivationScreen` currently calls `createCheckoutSession(email)` with `email` possibly
+  `undefined`, and `endpoints.createCheckoutSession` falls back to `''` so the request stays
+  well-typed — but an empty string is not a valid email and Stripe/the backend will presumably
+  reject it. Either (a) make `email` optional on `CheckoutSessionRequest` and let Stripe Checkout
+  collect it (Checkout can collect email itself when omitted), or (b) confirm the frontend must
+  collect an email before calling checkout in those states and I'll wire a prompt. Not fixed here —
+  `openapi/**` is out of scope for this workstream.
+
 ## Process-tree cancellation — CLOSED
 
 **Fixed via process groups.** `ProcessDsbulkRunner` starts the child under `setsid`, so it leads its

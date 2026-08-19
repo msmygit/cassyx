@@ -11,6 +11,7 @@ import UploadFileRoundedIcon from '@mui/icons-material/UploadFileRounded';
 import { NavLink, Outlet, useNavigate } from 'react-router';
 import { useLicense } from '../license/licenseModel';
 import { BypassBanner } from '../license/BypassBanner';
+import { TrialCountdown } from '../license/TrialCountdown';
 import { useDisconnect } from '../connections/useConnections';
 import { capabilityState } from '../vector/vectorModel';
 import { statementForNode, qualifiedName, type SchemaNode } from '../schema/model';
@@ -190,6 +191,7 @@ export function AppShell() {
           </Typography>
         )}
         <Box sx={{ flex: 1 }} />
+        {license.trial && <TrialCountdown daysRemaining={license.daysRemaining} />}
         <Typography variant="caption" color="text.secondary" data-testid="status-edition">
           {license.bypass
             ? 'edition: unlicensed-bypass'
