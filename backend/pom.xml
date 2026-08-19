@@ -6,7 +6,7 @@
 
   <groupId>io.cassyx</groupId>
   <artifactId>cassyx-parent</artifactId>
-  <version>0.1.0</version>
+  <version>1.0.0</version>
   <packaging>pom</packaging>
   <name>cassyx-parent</name>
   <description>cassyx - Cassandra / DSE / Astra data manager. Maven multi-module parent.</description>
