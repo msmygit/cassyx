@@ -123,7 +123,7 @@ cassyx/
 | Component | Version | Note |
 | --- | --- | --- |
 | Java | 21 LTS | virtual threads for per-range scan tasks |
-| Spring Boot | 3.5.x | |
+| Spring Boot | 3.5.16 | stays on the 3.5.x maintenance line; carries spring-framework 6.2.19 + tomcat 10.1.55 |
 | `java-driver-core` | 4.19.3 | ASF-owned; `CqlVector` since 4.16, vector in QueryBuilder via JAVA-3118 |
 | DSBulk | 1.11.2 | `com.datastax.oss:dsbulk-runner` |
 | React | 19 | |
@@ -133,6 +133,32 @@ cassyx/
 > **Security pin required:** `mvnrepository` flags **CVE-2026-24400** and **CVE-2023-6378** against
 > DSBulk 1.x transitive dependencies. Add explicit `<dependencyManagement>` overrides and wire
 > OWASP Dependency-Check into CI. Do not ship without this — it is a blocker, not a nice-to-have.
+
+**CVE-driven pins** (`backend/pom.xml`, plus `parquet`/`hadoop` in `backend/cassyx-bulk/pom.xml`).
+These come from the first complete `dependency-check-maven:aggregate` run over the reactor, which
+scans with `failBuildOnCVSS=7`. Every version below was checked against OSV and reports no known
+vulnerability; lowering any of them re-opens the listed findings.
+
+| Pin | Version | Clears |
+| --- | --- | --- |
+| `spring-boot` | 3.5.16 | 7 findings on 3.5.4 (CVE-2026-40974 9.8 worst), 21 on spring-core 6.2.9, 30 on tomcat-embed-core 10.1.43 |
+| `jackson-bom` | 2.22.2 | CVE-2026-54512/54513 (8.1); Boot 3.5.16's own 2.21.4 is still affected by CVE-2026-54515/59889 |
+| `netty-bom` | 4.1.137.Final | maintenance line, ahead of Boot's 4.1.135.Final |
+| `logback` | 1.5.34 | CVE-2023-6378 floor; 1.5.18 held logback *below* Boot's own version |
+| `log4j-bom` | 2.26.1 | CVE-2026-34477 / 34479 / 49844 on Boot's managed 2.24.3 (all under the gate) |
+| `parquet` | 1.18.0 | CVE-2025-46762 (7.1) and the jackson-databind **shaded inside** `parquet-jackson` (2.18.1 up to 1.15.2, 2.19.2 at 1.16.0, 2.21.3 at 1.17.1, clean 2.22.1 only at 1.18.0) |
+| `hadoop` | 3.4.2 | CVE-2025-27821 (7.3) against hadoop-auth |
+| `guava` | 33.7.1-jre | CVE-2023-2976 (7.1), CVE-2020-8908 on the 27.0-jre Hadoop drags in |
+| `commons-lang3` | 3.20.0 | CVE-2025-48924 |
+| `commons-configuration2` | 2.15.1 | CVE-2026-45205 |
+| `commons-beanutils` | 1.11.0 | CVE-2025-48734 (8.8); a floor only, nothing resolves it since configuration2 2.15.1 |
+| `aircompressor` | 2.0.3 | CVE-2025-67721 (6.3, under the gate) |
+
+The jackson, netty, log4j and java-driver BOMs MUST stay imported **before** `spring-boot-dependencies`:
+for imported BOMs it is first-declaration-wins, and a pin declared after Boot's BOM is silently
+ignored. Suppressions live in `backend/dependency-check-suppressions.xml`, wired into the plugin in
+`backend/pom.xml`; each one must carry a written justification (currently one entry, CVE-2023-37475,
+which is a Go-only Avro CVE mis-matched onto `parquet-avro`).
 
 ### 2.1 Modularity & reusability contract
 

@@ -21,8 +21,22 @@
     <cassyx.coverage.skip>false</cassyx.coverage.skip>
 
     <poi.version>5.4.1</poi.version>
-    <parquet.version>1.15.1</parquet.version>
-    <hadoop.version>3.4.1</hadoop.version>
+    <!-- 1.18.0, not 1.15.1. Two separate reasons, both from the first full Dependency-Check run:
+         - CVE-2025-46762 (7.1) is a real parquet-avro finding (trusted-package code execution when
+           reading the Avro schema out of Parquet file metadata), first fixed in 1.15.2.
+         - parquet-jackson SHADES jackson-databind inside its own jar (everything under shaded/),
+           so no <dependencyManagement> pin can reach it - the only lever is the parquet version.
+           1.15.1 and 1.15.2 both shade 2.18.1 and 1.16.0 shades 2.19.2, all of which carry
+           CVE-2026-54512 / CVE-2026-54513 (8.1 each) with no fix on those branches; 1.17.1 shades
+           2.21.3, still vulnerable. 1.18.0 is the first release shading a clean jackson (2.22.1),
+           which is also the line this repo pins for its own jackson. Verified by unzipping each
+           parquet-jackson jar and reading META-INF/maven/.../pom.properties, not by inference. -->
+    <parquet.version>1.18.0</parquet.version>
+    <!-- 3.4.2 clears CVE-2025-27821 (7.3), which Dependency-Check reports against hadoop-auth 3.4.1
+         by CPE. The bug itself is an out-of-bounds write in the HDFS NATIVE (C) client, which this
+         module never touches, but 3.4.2 is a patch release on the same line so upgrading is cheaper
+         and more honest than arguing the CPE match away in a suppression. -->
+    <hadoop.version>3.4.2</hadoop.version>
     <awssdk.version>2.31.30</awssdk.version>
   </properties>
 
