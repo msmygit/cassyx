@@ -16,6 +16,10 @@
     <checkstyle.config.path>${project.parent.basedir}/config/checkstyle.xml</checkstyle.config.path>
     <!-- section 11.1 gate -->
     <cassyx.coverage.line>0.90</cassyx.coverage.line>
+    <!-- Enforced from here on: the module now carries real logic (verification, trials, scope, and
+         the Stripe provider), so the Phase 0 blanket skip no longer applies. Measured 92.3% when
+         this was switched on. Anything added here needs tests to match - that is the point. -->
+    <cassyx.coverage.skip>false</cassyx.coverage.skip>
   </properties>
 
   <dependencies>
@@ -27,8 +31,13 @@
       <groupId>com.fasterxml.jackson.core</groupId>
       <artifactId>jackson-databind</artifactId>
     </dependency>
-    <!-- Stripe SDK is pinned in the parent (33.2.0, API version 2026-07-29.dahlia) and is added by
-         the Phase 1 workstream H agent together with StripePaymentProvider. NoopPaymentProvider
-         needs no dependencies, which is exactly the point of the SPI. -->
+    <!-- Stripe SDK, pinned in the parent (33.2.0, API version 2026-07-29.dahlia). A compile
+         dependency rather than optional, so cassyx-api and the licensing service inherit it without
+         restating the pin. NoopPaymentProvider still loads none of it, which is exactly the point
+         of the SPI: a reseller can drop in another processor and never touch a Stripe class. -->
+    <dependency>
+      <groupId>com.stripe</groupId>
+      <artifactId>stripe-java</artifactId>
+    </dependency>
   </dependencies>
 </project>

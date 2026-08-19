@@ -227,3 +227,45 @@ to this workstream, so the contract does not yet describe any of it. Needed:
 
 Until this lands, the frontend must treat a `402` from any `/api` call as "licence problem, read
 `state`" without generated types for the body.
+## Billing and licensing service - needs
+
+From the workstream that built `StripePaymentProvider`, `/api/billing/**` and `licensing/`
+(plan §9.3, §9.4). None of these are blockers; each is a change in a file this workstream does not
+own.
+
+1. **`cassyx.billing.*` is not passed to `StripePaymentProvider`.** The `PaymentProvider` bean in
+   `CassyxCoreConfiguration` is ServiceLoader-selected by id, and cassyx-api may not import
+   `io.cassyx.license.impl..` (ModularityArchitectureTest, plan §2.1). So the Stripe provider reads
+   its credentials from the ENVIRONMENT (`STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`,
+   `CASSYX_BILLING_API_URL`, optional `CASSYX_BILLING_INTEGRATION_ID`) — the same variables
+   `application.yml` binds `cassyx.billing.*` from, so a normal Docker deployment works. Setting the
+   YAML properties WITHOUT the env vars would not. The clean fix is a factory in
+   `io.cassyx.license.api` (owner: whoever owns `PaymentProvider.java`), e.g.
+   `LicenseFactory.paymentProvider(String id, Map<String,String> config)`, after which
+   `CassyxCoreConfiguration` can hand it `BillingProperties`.
+2. **`PaymentProvider.CheckoutRequest` has no `quantity`.** The contract's
+   `CheckoutSessionRequest.quantity` therefore travels in `metadata["quantity"]` and
+   `StripePaymentProvider` reads it back for the line item. A `quantity` component on the record
+   would remove the indirection.
+3. **No Spring Security is on the cassyx-api classpath**, so "webhook is CSRF-exempt" (§9.3) is
+   currently satisfied by there being no CSRF filter at all. Whoever adds the licence gate /
+   Spring Security must explicitly exclude `POST /api/billing/webhook` from CSRF **and** from the
+   licence gate, and must not install a filter that consumes the request body — the Stripe
+   signature covers the RAW bytes and any re-read breaks verification.
+4. **`frontend/src/api/schema.d.ts` is stale by one generation.** `make contract` regenerates it and
+   the billing 500 response added to `/api/billing/webhook` shows up there; the regenerated file was
+   reverted rather than committed, since `frontend/**` belongs to another workstream. Re-run
+   `npm run gen:api`.
+5. **`cassyx-license` now enforces its §11.1 coverage gate** (`cassyx.coverage.skip=false` in its
+   own POM, line ≥ 0.90, measured 92.3%). Whoever adds the `site` edition to `License.java` should
+   expect `mvn verify` on that module to require tests for it.
+6. **`licensing/` is outside the default reactor**, behind `-Plicensing` in `backend/pom.xml`, so
+   `backend/Dockerfile` (whose build context is `./backend`) is unaffected. If the licensing service
+   should be part of `make up`, it needs its own compose service built from `licensing/Dockerfile`
+   with the repository root as context — deliberately not added here, since `docker-compose.yml`
+   and the root `.env.example` belong to other workstreams. Its env template is
+   `licensing/.env.example`.
+7. **Email is a stub.** `LicenseEmailSender` has one implementation (`log`) that writes the key to
+   the service log. A real provider is a new implementation plus one line in
+   `LicensingConfiguration`; an unrecognised `CASSYX_LICENSING_EMAIL_PROVIDER` fails startup rather
+   than silently falling back, so nobody believes customers are being emailed when they are not.

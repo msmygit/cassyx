@@ -1,1 +1,2 @@
 io.cassyx.license.impl.NoopPaymentProvider
+io.cassyx.license.impl.stripe.StripePaymentProvider

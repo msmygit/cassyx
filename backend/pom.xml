@@ -585,4 +585,26 @@
       </plugin>
     </plugins>
   </build>
+
+  <profiles>
+    <!--
+      The operator-run licence minting service (plan sections 9.1, 9.3, 9.4). Deliberately OUT of
+      the default reactor, behind `-Plicensing`:
+
+        * backend/Dockerfile builds with `./backend` as its context and copies each module POM by
+          name. A module at ../licensing is not in that context at all, so putting it in <modules>
+          would break `make up` for everyone.
+        * It is not shipped to customers. It holds the Ed25519 PRIVATE key, which must never be
+          inside the product image, and there is no reason for the product build to compile it.
+
+      Build it with:  mvn -B -Plicensing -pl ../licensing -am test
+      Or standalone:  mvn -B -f ../licensing/pom.xml test   (resolves this POM via relativePath)
+    -->
+    <profile>
+      <id>licensing</id>
+      <modules>
+        <module>../licensing</module>
+      </modules>
+    </profile>
+  </profiles>
 </project>

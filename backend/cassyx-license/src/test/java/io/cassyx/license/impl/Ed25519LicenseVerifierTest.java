@@ -138,7 +138,11 @@ class Ed25519LicenseVerifierTest {
                         Map.of()))
                 .provider())
         .isEqualTo("noop");
-    assertThatThrownBy(() -> LicenseFactory.paymentProvider("stripe"))
+    // 'stripe' resolves now that StripePaymentProvider is registered alongside noop (plan 9.3);
+    // an unknown id still fails loudly rather than silently falling back to a provider that
+    // cannot take money.
+    assertThat(LicenseFactory.paymentProvider("stripe").id()).isEqualTo("stripe");
+    assertThatThrownBy(() -> LicenseFactory.paymentProvider("paypal"))
         .isInstanceOf(IllegalArgumentException.class);
   }
 }
