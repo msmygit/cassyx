@@ -1,6 +1,10 @@
 package io.cassyx.api.health;
 
+import io.cassyx.api.config.CassyxVersion;
+import io.cassyx.license.api.BypassPolicy;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.info.BuildProperties;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -20,11 +24,25 @@ public class HealthController {
   private final String version;
   private final boolean licenseEnforced;
 
+  /**
+   * {@code cassyx.version} was never set anywhere, so this used to report a hardcoded default that
+   * was wrong the moment the reactor version moved. The version now comes from {@link
+   * CassyxVersion}, whose source of truth is the {@code build-info} goal of spring-boot-maven-plugin
+   * and which degrades to {@code unknown} rather than to a plausible-looking lie.
+   *
+   * <p>{@code licenseEnforced} is likewise the EFFECTIVE value (plan section 9.2): a release build
+   * ignores {@code CASSYX_LICENSE_ENFORCE=false}, and reporting the raw flag here would have this
+   * endpoint claim enforcement is off while the gate refuses every request.
+   */
   public HealthController(
-      @Value("${cassyx.version:0.1.0-SNAPSHOT}") String version,
-      @Value("${cassyx.license.enforce:true}") boolean licenseEnforced) {
-    this.version = version;
-    this.licenseEnforced = licenseEnforced;
+      ObjectProvider<BuildProperties> buildProperties,
+      @Value("${cassyx.version:}") String configuredVersion,
+      @Value("${spring.application.version:}") String springApplicationVersion,
+      @Value("${cassyx.license.enforce:true}") boolean enforce,
+      @Value("${cassyx.license.bypass-allowed:true}") boolean bypassAllowed) {
+    this.version =
+        new CassyxVersion(buildProperties, configuredVersion, springApplicationVersion).value();
+    this.licenseEnforced = BypassPolicy.of(enforce, bypassAllowed).enforcing();
   }
 
   @GetMapping("/api/health")

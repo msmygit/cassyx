@@ -660,8 +660,34 @@ license payload (base64url, dot-separated from signature):
 
 - `LicenseService.verify()` — signature check against `CASSYX_LICENSE_PUBLIC_KEY` (compile-time
   constant, overridable for dev). No network call on the hot path.
-- Spring Security filter + `@RequiresLicense` annotation gate all `/api/**` except
-  `/api/health`, `/api/license/**`, and `/api/billing/**`.
+- **Server-side gate: `LicenseGateFilter`**, a plain `OncePerRequestFilter` registered as a
+  `FilterRegistrationBean` on `/api/*`. It refuses every `/api/**` request except `/api/health`,
+  `/api/license/**` and `/api/billing/**` with **`402 Payment Required`** and an RFC 9457
+  `application/problem+json` body carrying the `state` (`ABSENT`, `EXPIRED`, `INVALID_SIGNATURE`,
+  `UPGRADE_REQUIRED`, `MALFORMED`), `invitesPurchase` and a build-appropriate `unlockHint`, so the
+  frontend routes to the correct screen instead of a generic error. Non-`/api` paths (the SPA and
+  its assets) are untouched: gating them would take down the very activation screen the 402 points
+  at. Prefix matching is exact-or-subtree, so `/api/licenseholders` stays gated.
+- **Not Spring Security, deliberately.** Its value is authentication and authorisation machinery,
+  and section 12 records that cassyx assumes a single-user self-hosted instance - there are no
+  principals, roles or sessions. What it would add is a filter chain, a servlet-wide security
+  config, and CSRF protection that the Stripe webhook under `/api/billing/**` would then need an
+  explicit exemption from: a new way to break payments in exchange for nothing. If real user
+  accounts ever arrive, Spring Security can replace the filter and reuse the same `LicenseGate`.
+- **One decision, two consumers.** `LicenseGate` (a single bean) holds the verifier, the
+  `BypassPolicy` and the running version; the filter and `GET /api/license` both read it, so they
+  cannot disagree. A gate that says "locked" while the status endpoint says "unlocked" is a support
+  ticket; the reverse is the product given away. `LicenseGateConsistencyTest` asserts the agreement
+  across the whole (public key × key × enforce × bypass-allowed × version) matrix.
+- **Fails closed.** Any exception from verification becomes an invalid verdict, never an allow. An
+  unusable `cassyx.license.public-key` still leaves `/api/license` reachable reporting `MALFORMED`,
+  because a configuration gap must be diagnosable rather than silent.
+- **Hot path.** The verdict is cached for 30s and invalidated on activation - long enough to
+  collapse a burst of API calls onto one Ed25519 verify, short enough that a lapsing trial does not
+  survive until the next restart.
+- **Version scoping is live.** The running major comes from `CassyxVersion`, sourced from
+  spring-boot-maven-plugin's `build-info` goal and degrading to `1.0.0` (never `0.x`, whose
+  `coversMajor()` is true for every scope and would make scoping fail silently open).
 - Frontend: a `LicenseGate` provider; unlicensed state renders an activation/purchase screen.
 
 ### 9.2 Site licences, and the build-gated bypass flag

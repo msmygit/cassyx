@@ -1,12 +1,10 @@
 package io.cassyx.api.license;
 
-import io.cassyx.license.api.BypassPolicy;
+import io.cassyx.api.config.CassyxVersion;
 import io.cassyx.license.api.License;
-import io.cassyx.license.api.LicenseFactory;
 import io.cassyx.license.api.LicenseState;
 import io.cassyx.license.api.LicenseStatus;
-import io.cassyx.license.api.LicenseVerifier;
-import org.springframework.beans.factory.annotation.Value;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -21,85 +19,40 @@ import org.springframework.web.bind.annotation.RestController;
  * <p>Response shape is the {@code LicenseStatus} schema in {@code openapi/cassyx-api.yaml}; per plan
  * section 2.3 the contract governs. Verification is entirely local (plan section 9.1) - no network
  * call - because self-hosted Cassandra clusters frequently have no egress.
+ *
+ * <p>This controller decides NOTHING itself: the verdict comes from the shared {@link LicenseGate},
+ * which is the same instance the request filter consults. That is deliberate - see {@link
+ * LicenseGate} for why a second copy of this logic would be a bug rather than a duplication.
  */
 @RestController
 public class LicenseController {
 
-  private final LicenseVerifier verifier;
-  private final String configuredKey;
-  private final BypassPolicy bypassPolicy;
-  private final int appMajor;
+  private final LicenseGate gate;
 
-  public LicenseController(
-      @Value("${cassyx.license.public-key:}") String publicKeyBase64,
-      @Value("${cassyx.license.key:}") String configuredKey,
-      @Value("${cassyx.license.enforce:true}") boolean enforce,
-      @Value("${cassyx.license.bypass-allowed:true}") boolean bypassAllowed,
-      @Value("${cassyx.version:0.1.0-SNAPSHOT}") String version) {
-    // The shipped default for cassyx.license.public-key is the literal "PLACEHOLDER", which is not
-    // a decodable Ed25519 key. Building the verifier eagerly therefore threw in the constructor and
-    // took the entire application down at boot - so a fresh `make up` served nothing at all and the
-    // UI reported "Could not reach the cassyx API".
-    //
-    // A placeholder credential is a configuration gap, not a fatal error: with enforce=false the
-    // verifier is never consulted, and with enforce=true the honest answer is "no usable key", which
-    // this endpoint must still be reachable to say.
-    this.verifier = tryBuildVerifier(publicKeyBase64);
-    this.configuredKey = configuredKey;
-    // The build-time gate of plan section 9.2: in a release build enforce=false is inert, so every
-    // answer this endpoint gives is derived from the POLICY, never from the raw flag.
-    this.bypassPolicy = BypassPolicy.of(enforce, bypassAllowed);
-    this.appMajor = majorOf(version);
+  @Autowired
+  public LicenseController(LicenseGate gate) {
+    this.gate = gate;
   }
 
-  private static LicenseVerifier tryBuildVerifier(String publicKeyBase64) {
-    if (publicKeyBase64 == null || publicKeyBase64.isBlank() || "PLACEHOLDER".equals(publicKeyBase64)) {
-      return null;
-    }
-    try {
-      return LicenseFactory.verifier(publicKeyBase64);
-    } catch (RuntimeException e) {
-      // Reported through the endpoint below rather than thrown, for the reason above.
-      return null;
-    }
+  /**
+   * Convenience form for tests and for callers holding raw configuration. Builds its own gate, so
+   * it must never be used to wire the application: the filter would then hold a different instance
+   * and the two could drift apart under a future change.
+   */
+  public LicenseController(
+      String publicKeyBase64,
+      String configuredKey,
+      boolean enforce,
+      boolean bypassAllowed,
+      String version) {
+    this(
+        new LicenseGate(
+            publicKeyBase64, configuredKey, enforce, bypassAllowed, CassyxVersion.of(version)));
   }
 
   @GetMapping("/api/license")
   public LicenseStatusResponse current() {
-    return describe(check(configuredKey));
-  }
-
-  /**
-   * Verification, tolerant of an unconfigured public key. When the bypass is granted it wins
-   * outright (plan section 9.2); when it is refused or never asked for and no public key is
-   * configured, we report {@code MALFORMED} with an operator-facing reason rather than pretending
-   * the licence is merely absent - those are different problems with different fixes.
-   */
-  private LicenseStatus check(String key) {
-    if (bypassPolicy.granted()) {
-      return LicenseFactory.check(verifier, key, false, true);
-    }
-    if (verifier == null) {
-      return LicenseStatus.invalid(
-          "cassyx.license.public-key is not configured, so no licence can be verified. "
-              + "Set CASSYX_LICENSE_PUBLIC_KEY. "
-              + unlockAdvice(),
-          LicenseState.MALFORMED);
-    }
-    // Not granted, so enforcement is on whatever the flag said: verify for real.
-    return LicenseFactory.check(verifier, key, true, bypassPolicy.allowed());
-  }
-
-  /**
-   * The honest way out of a locked instance, which differs by build: a dev build still takes the
-   * env flag, a release build does not and needs a signed site licence instead. Telling a release
-   * operator to set a flag that this build ignores is worse than saying nothing.
-   */
-  private String unlockAdvice() {
-    return bypassPolicy.allowed()
-        ? "Or set CASSYX_LICENSE_ENFORCE=false to run unlocked (development builds only)."
-        : "To run unlocked, request a free site licence (CI, evaluation, enterprise) and set "
-            + "CASSYX_LICENSE_KEY; " + BypassPolicy.ENFORCE_ENV_VAR + " is ignored in this build.";
+    return describe(gate.status());
   }
 
   /**
@@ -110,7 +63,12 @@ public class LicenseController {
   @PostMapping("/api/license/activate")
   public ResponseEntity<LicenseStatusResponse> activate(@RequestBody ActivationRequest request) {
     String key = request == null ? null : request.licenseKey();
-    LicenseStatusResponse body = describe(check(key));
+    LicenseStatusResponse body = describe(gate.check(key));
+    if (body.licensed()) {
+      // Requirement of plan section 9.1's hot-path cache: the gate memoises its verdict, and a
+      // customer who has just activated must not sit through the TTL watching 402s.
+      gate.invalidate();
+    }
     // A bad key is a normal, expected answer rather than a server fault, but it is still a rejected
     // activation - 422 lets the UI distinguish "we read your key and it is not valid" from "the
     // request itself was malformed".
@@ -123,10 +81,10 @@ public class LicenseController {
     // `enforce` is likewise the EFFECTIVE value, so the tuple (enforce, bypass, edition, state)
     // never contradicts itself - a client that trusts `enforce=false` would otherwise show an
     // "unlocked" UI over an instance that is verifying licences.
-    boolean bypass = bypassPolicy.granted() || status.state() == LicenseState.BYPASS;
+    boolean bypass = gate.policy().granted() || status.state() == LicenseState.BYPASS;
     return new LicenseStatusResponse(
         status.valid(),
-        bypassPolicy.enforcing(),
+        gate.policy().enforcing(),
         bypass,
         edition(license, bypass, status),
         status.state() == null ? null : status.state().name(),
@@ -153,18 +111,6 @@ public class LicenseController {
       return license.edition();
     }
     return status.valid() ? "standard" : "none";
-  }
-
-  /** {@code 0.1.0-SNAPSHOT} -> {@code 0}. Falls back to 0, which the verifier treats as unscoped. */
-  private static int majorOf(String version) {
-    if (version == null || version.isBlank()) {
-      return 0;
-    }
-    try {
-      return Integer.parseInt(version.split("[.\\-+]")[0]);
-    } catch (NumberFormatException e) {
-      return 0;
-    }
   }
 
   /** Mirrors the contract's {@code LicenseActivationRequest}. */

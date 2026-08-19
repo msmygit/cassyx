@@ -170,6 +170,13 @@
           <execution>
             <goals>
               <goal>repackage</goal>
+              <!-- Writes META-INF/build-info.properties, which Boot exposes as a BuildProperties
+                   bean. That is the source of truth for io.cassyx.api.config.CassyxVersion, and
+                   therefore for the major version the licence gate uses to decide UPGRADE_REQUIRED
+                   (plan section 9.5). Chosen over resource filtering because it needs no filtering
+                   configuration and does not compete with the @-delimited filtering application.yml
+                   already uses for cassyx.license.bypass-allowed. -->
+              <goal>build-info</goal>
             </goals>
           </execution>
         </executions>

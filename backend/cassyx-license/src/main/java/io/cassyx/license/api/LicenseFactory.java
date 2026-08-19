@@ -13,10 +13,33 @@ import java.util.List;
  */
 public final class LicenseFactory {
 
+  /**
+   * Application major version sentinel meaning "do not check {@code scope} at all" (plan section
+   * 9.5). Callers that cannot determine their own version must pass this rather than a plausible
+   * integer: a wrong major turns an upgrade question into a wrong answer in one direction or the
+   * other.
+   */
+  public static final int UNSCOPED = Ed25519LicenseVerifier.UNSCOPED;
+
   private LicenseFactory() {}
 
   public static LicenseVerifier verifier(String publicKeyBase64) {
     return new Ed25519LicenseVerifier(publicKeyBase64);
+  }
+
+  /**
+   * Verifier that also enforces the purchased major version (plan section 9.5), reporting {@link
+   * LicenseState#UPGRADE_REQUIRED} for a genuine key bought for an older major. Pass {@link
+   * #UNSCOPED} to skip that check.
+   *
+   * <p>Exists because the scope-aware constructor lives in the implementation package, which
+   * cassyx-api is forbidden to import (plan section 2.1, ArchUnit-enforced).
+   */
+  public static LicenseVerifier verifier(String publicKeyBase64, int appMajor) {
+    return new Ed25519LicenseVerifier(
+        Ed25519LicenseVerifier.decodePublicKey(publicKeyBase64),
+        java.time.Clock.system(java.time.ZoneOffset.UTC),
+        appMajor);
   }
 
   /**

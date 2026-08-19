@@ -4,11 +4,14 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import io.cassyx.api.config.CassyxVersion;
 import io.cassyx.api.license.LicenseController;
+import io.cassyx.api.license.LicenseGate;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
+import org.springframework.context.annotation.Import;
 import org.springframework.test.context.TestPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
 
@@ -29,6 +32,9 @@ class LicenseEndpointTest {
    */
   @Nested
   @WebMvcTest(LicenseController.class)
+  // The controller delegates to the shared LicenseGate (plan section 9.1), which the request
+  // filter also holds; a @WebMvcTest slice does not component-scan it, so import it explicitly.
+  @Import({LicenseGate.class, CassyxVersion.class})
   @TestPropertySource(
       properties = {
         "cassyx.license.public-key=PLACEHOLDER",
@@ -54,6 +60,9 @@ class LicenseEndpointTest {
   /** The default developer experience: enforcement off, everything unlocked, banner visible. */
   @Nested
   @WebMvcTest(LicenseController.class)
+  // The controller delegates to the shared LicenseGate (plan section 9.1), which the request
+  // filter also holds; a @WebMvcTest slice does not component-scan it, so import it explicitly.
+  @Import({LicenseGate.class, CassyxVersion.class})
   @TestPropertySource(
       properties = {"cassyx.license.public-key=PLACEHOLDER", "cassyx.license.enforce=false"})
   class WithEnforcementDisabled {
