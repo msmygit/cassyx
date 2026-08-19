@@ -1,11 +1,23 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   isTerminalStatus,
+  MAX_SSE_RECONNECT_ERRORS,
   parseSseChunk,
+  probeSseGate,
   readSseStream,
   SseParser,
   subscribeToJobEvents,
 } from './sse';
+import { problemFromResponse } from './errors';
+import {
+  resetLicenseRequiredListeners,
+  subscribeToLicenseRequired,
+  type LicenseRequiredEvent,
+} from './licenseSignal';
+
+afterEach(() => {
+  resetLicenseRequiredListeners();
+});
 
 describe('parseSseChunk', () => {
   it('parses event, data, id and retry fields', () => {
@@ -70,6 +82,45 @@ describe('readSseStream', () => {
   });
 });
 
+describe('probeSseGate', () => {
+  it('reports the licence problem behind a 402', async () => {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ title: 'License required', status: 402, state: 'ABSENT' }), {
+          status: 402,
+          headers: { 'content-type': 'application/problem+json' },
+        }),
+    );
+    const error = await probeSseGate('/api/jobs/1/events', fetchImpl);
+    expect(error?.licenseRequired?.state).toBe('ABSENT');
+    const [, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect((init.headers as Record<string, string>).Accept).toBe('text/event-stream');
+  });
+
+  it('abandons the response when the stream is healthy again', async () => {
+    let aborted = false;
+    const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      init?.signal?.addEventListener('abort', () => {
+        aborted = true;
+      });
+      return new Response('data: hi\n\n', {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      });
+    }) as unknown as typeof fetch;
+
+    expect(await probeSseGate('/api/jobs/1/events', fetchImpl)).toBeNull();
+    expect(aborted).toBe(true);
+  });
+
+  it('answers "do not know" when the probe itself fails', async () => {
+    const fetchImpl = vi.fn(async () => {
+      throw new TypeError('Failed to fetch');
+    }) as unknown as typeof fetch;
+    expect(await probeSseGate('/api/jobs/1/events', fetchImpl)).toBeNull();
+  });
+});
+
 /** Minimal EventSource double supporting the contract's NAMED events. */
 class FakeEventSource {
   onerror: (() => void) | null = null;
@@ -102,6 +153,8 @@ function subscribe(handlers: Parameters<typeof subscribeToJobEvents>[1]) {
   let source!: FakeEventSource;
   const subscription = subscribeToJobEvents('job-1', handlers, {
     url: '/api/jobs/job-1/events',
+    // Default is a real fetch probe; these cases are about the EventSource layer alone.
+    probe: async () => null,
     factory: (url) => {
       source = new FakeEventSource(url);
       return source as unknown as EventSource;
@@ -186,6 +239,93 @@ describe('subscribeToJobEvents', () => {
     source.readyState = 2;
     source.onerror?.();
     expect(onError).toHaveBeenCalledOnce();
+  });
+
+  it('gives up rather than reconnecting forever against a wall', () => {
+    const onError = vi.fn();
+    const { source } = subscribe({ onError });
+
+    // readyState stays CONNECTING: some implementations retry a refused stream indefinitely.
+    for (let i = 0; i < MAX_SSE_RECONNECT_ERRORS; i += 1) source.onerror?.();
+
+    expect(onError).toHaveBeenCalledOnce();
+    expect(source.closed).toBe(true);
+  });
+
+  it('probes once for the reason and reports a licence wall', async () => {
+    const onLicenseRequired = vi.fn();
+    const seen: LicenseRequiredEvent[] = [];
+    subscribeToLicenseRequired((event) => seen.push(event));
+    const probe = vi.fn(
+      async () =>
+        await problemFromResponse(
+          new Response(
+            JSON.stringify({ title: 'License required', status: 402, state: 'EXPIRED' }),
+            {
+              status: 402,
+              headers: { 'content-type': 'application/problem+json' },
+            },
+          ),
+          'SSE /api/jobs',
+        ),
+    );
+
+    let source!: FakeEventSource;
+    subscribeToJobEvents(
+      'job-1',
+      { onLicenseRequired },
+      {
+        url: '/api/jobs/job-1/events',
+        probe,
+        factory: (url) => {
+          source = new FakeEventSource(url);
+          return source as unknown as EventSource;
+        },
+      },
+    );
+
+    source.readyState = 2;
+    source.onerror?.();
+    source.onerror?.(); // a second failure must not mean a second probe
+    await vi.waitFor(() => expect(onLicenseRequired).toHaveBeenCalledOnce());
+
+    expect(probe).toHaveBeenCalledOnce();
+    expect(seen).toEqual([
+      {
+        state: 'EXPIRED',
+        detail: null,
+        invitesPurchase: false,
+        unlockHint: null,
+        request: 'SSE /api/jobs',
+      },
+    ]);
+  });
+
+  it('stays quiet when the stream died for some other reason', async () => {
+    const onLicenseRequired = vi.fn();
+    const listener = vi.fn();
+    subscribeToLicenseRequired(listener);
+    const probe = vi.fn(async () => null);
+
+    let source!: FakeEventSource;
+    subscribeToJobEvents(
+      'job-1',
+      { onLicenseRequired },
+      {
+        url: '/api/jobs/job-1/events',
+        probe,
+        factory: (url) => {
+          source = new FakeEventSource(url);
+          return source as unknown as EventSource;
+        },
+      },
+    );
+
+    source.readyState = 2;
+    source.onerror?.();
+    await vi.waitFor(() => expect(probe).toHaveBeenCalledOnce());
+    expect(onLicenseRequired).not.toHaveBeenCalled();
+    expect(listener).not.toHaveBeenCalled();
   });
 
   it('knows which statuses are terminal', () => {

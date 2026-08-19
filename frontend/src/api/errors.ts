@@ -26,6 +26,62 @@ export interface ProblemDetails {
   [key: string]: unknown;
 }
 
+/**
+ * The `LicenseState` enum carried by the licence gate's 402 (plan §9.1).
+ *
+ * HAND-WRITTEN ON PURPOSE: `openapi/cassyx-api.yaml` does not describe the 402 response or its
+ * extension members yet (see docs/integration-todo.md), so `schema.d.ts` cannot supply this. When
+ * the contract catches up, this should become an alias of the generated `LicenseState`.
+ */
+export const LICENSE_GATE_STATES = [
+  'VALID',
+  'BYPASS',
+  'EXPIRED',
+  'ABSENT',
+  'MALFORMED',
+  'INVALID_SIGNATURE',
+  'UPGRADE_REQUIRED',
+] as const;
+
+export type LicenseGateState = (typeof LICENSE_GATE_STATES)[number];
+
+/**
+ * A 402 from `LicenseGateFilter`, normalised.
+ *
+ * `state` degrades to `'UNKNOWN'` rather than throwing: a 402 can also come from a proxy with no
+ * body at all, and a newer backend may name a state this build has never heard of. Either way the
+ * app still has to route the user to the activation screen, so an unparseable body must not turn
+ * into a generic "something went wrong".
+ */
+export interface LicenseRequiredDetails {
+  state: LicenseGateState | 'UNKNOWN';
+  /** Human-readable reason, when the server sent one. */
+  detail: string | null;
+  /** True for the states worth showing a purchase CTA for (plan §9.4). */
+  invitesPurchase: boolean;
+  /** Operator-facing remedy; differs between a dev and a release build. */
+  unlockHint: string | null;
+}
+
+function isLicenseGateState(value: unknown): value is LicenseGateState {
+  return typeof value === 'string' && (LICENSE_GATE_STATES as readonly string[]).includes(value);
+}
+
+/** Normalise a 402 body into `LicenseRequiredDetails`. Returns null for any other status. */
+export function parseLicenseRequired(
+  problem: ProblemDetails | undefined,
+  status: number,
+): LicenseRequiredDetails | null {
+  if (status !== 402) return null;
+  const state = isLicenseGateState(problem?.state) ? problem.state : 'UNKNOWN';
+  return {
+    state,
+    detail: typeof problem?.detail === 'string' ? problem.detail : null,
+    invitesPurchase: problem?.invitesPurchase === true,
+    unlockHint: typeof problem?.unlockHint === 'string' ? problem.unlockHint : null,
+  };
+}
+
 export type AppErrorKind =
   /** Server responded with a problem+json (or other) error body. */
   | 'http'
@@ -80,6 +136,11 @@ export class AppError extends Error {
   /** 402 — the license gate rejected the request (plan §9.1). */
   get isLicenseRequired(): boolean {
     return this.status === 402;
+  }
+
+  /** The gate's verdict, or null when this is not a 402. */
+  get licenseRequired(): LicenseRequiredDetails | null {
+    return parseLicenseRequired(this.problem, this.status);
   }
 
   get isNotFound(): boolean {
@@ -158,6 +219,16 @@ export async function problemFromResponse(response: Response, request?: string):
     problem,
     request,
   });
+}
+
+/**
+ * Narrowing guard for "this failed because the instance is unlicensed".
+ *
+ * Takes `unknown` because the places that need it (TanStack Query cache predicates, error
+ * boundaries) only ever see `unknown`.
+ */
+export function isLicenseRequiredError(error: unknown): error is AppError {
+  return error instanceof AppError && error.isLicenseRequired;
 }
 
 /** Normalise anything thrown by `fetch` (or by us) into an `AppError`. */

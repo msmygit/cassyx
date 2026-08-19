@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   AppError,
   httpStatusTitle,
+  isLicenseRequiredError,
+  parseLicenseRequired,
   problemFromResponse,
   toAppError,
   toProblemDetails,
@@ -93,6 +95,102 @@ describe('RFC 9457 problem parsing', () => {
   it('names unknown statuses', () => {
     expect(httpStatusTitle(599)).toBe('Server error');
     expect(httpStatusTitle(418)).toBe('Request failed');
+  });
+});
+
+/** plan §9.1 — the gate's 402 is the first thing an unlicensed customer meets. */
+describe('license gate 402 parsing', () => {
+  it('parses a full license problem+json body', async () => {
+    const error = await problemFromResponse(
+      problemResponse(
+        {
+          type: 'https://cassyx.dev/problems/license-required',
+          title: 'License required',
+          status: 402,
+          detail: 'Your trial expired on 1 September 2026.',
+          instance: '/api/connections',
+          state: 'EXPIRED',
+          invitesPurchase: true,
+          unlockHint: 'Paste a key on the activation screen.',
+        },
+        402,
+      ),
+      'GET /api/connections',
+    );
+
+    expect(isLicenseRequiredError(error)).toBe(true);
+    expect(error.licenseRequired).toEqual({
+      state: 'EXPIRED',
+      detail: 'Your trial expired on 1 September 2026.',
+      invitesPurchase: true,
+      unlockHint: 'Paste a key on the activation screen.',
+    });
+  });
+
+  it('degrades to UNKNOWN for a 402 with no body at all (a proxy can produce one)', async () => {
+    const error = await problemFromResponse(new Response(null, { status: 402 }));
+    expect(error.licenseRequired).toEqual({
+      state: 'UNKNOWN',
+      detail: null,
+      invitesPurchase: false,
+      unlockHint: null,
+    });
+  });
+
+  it('degrades to UNKNOWN for a 402 that is not problem+json', async () => {
+    const error = await problemFromResponse(
+      new Response('<html>Payment Required</html>', {
+        status: 402,
+        headers: { 'content-type': 'text/html' },
+      }),
+    );
+    expect(error.licenseRequired?.state).toBe('UNKNOWN');
+    expect(error.userMessage).toBe('License required');
+  });
+
+  it('degrades to UNKNOWN for an empty problem+json body', async () => {
+    const error = await problemFromResponse(
+      new Response('', { status: 402, headers: { 'content-type': 'application/problem+json' } }),
+    );
+    expect(error.licenseRequired?.state).toBe('UNKNOWN');
+  });
+
+  it('degrades to UNKNOWN for a state this build does not recognise', () => {
+    const details = parseLicenseRequired(
+      { type: 'about:blank', title: 'License required', status: 402, state: 'REVOKED' },
+      402,
+    );
+    expect(details?.state).toBe('UNKNOWN');
+  });
+
+  it('ignores extension members of the wrong type rather than trusting them', () => {
+    const details = parseLicenseRequired(
+      {
+        type: 'about:blank',
+        title: 'License required',
+        status: 402,
+        state: 42,
+        invitesPurchase: 'yes',
+        unlockHint: { hint: 'no' },
+      },
+      402,
+    );
+    expect(details).toEqual({
+      state: 'UNKNOWN',
+      detail: null,
+      // A non-boolean must never be read as "offer to sell them something".
+      invitesPurchase: false,
+      unlockHint: null,
+    });
+  });
+
+  it('is null for every other status, so nothing else can reach the activation screen', async () => {
+    const error = await problemFromResponse(
+      problemResponse({ title: 'Forbidden', status: 403, state: 'ABSENT' }, 403),
+    );
+    expect(error.licenseRequired).toBeNull();
+    expect(isLicenseRequiredError(error)).toBe(false);
+    expect(isLicenseRequiredError(new Error('boom'))).toBe(false);
   });
 });
 

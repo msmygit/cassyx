@@ -1,6 +1,11 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ApiClient, buildUrl } from './client';
 import type { AppError } from './errors';
+import {
+  resetLicenseRequiredListeners,
+  subscribeToLicenseRequired,
+  type LicenseRequiredEvent,
+} from './licenseSignal';
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -120,5 +125,71 @@ describe('ApiClient', () => {
   it('exposes absolute URLs for streaming endpoints', () => {
     const client = new ApiClient({ baseUrl: 'http://api' });
     expect(client.url('/api/jobs/1/events')).toBe('http://api/api/jobs/1/events');
+  });
+});
+
+/** plan §9.1 — any gated call can 402, so the transport is where it gets announced. */
+describe('license gate signal', () => {
+  afterEach(() => {
+    resetLicenseRequiredListeners();
+  });
+
+  it('publishes a 402 to every subscriber, with the parsed state', async () => {
+    const seen: LicenseRequiredEvent[] = [];
+    subscribeToLicenseRequired((event) => seen.push(event));
+
+    const client = new ApiClient({
+      fetchImpl: vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({ title: 'License required', status: 402, state: 'ABSENT' }),
+            { status: 402, headers: { 'content-type': 'application/problem+json' } },
+          ),
+      ),
+    });
+    await client.get('/api/connections').catch(() => undefined);
+
+    expect(seen).toEqual([
+      {
+        state: 'ABSENT',
+        detail: null,
+        invitesPurchase: false,
+        unlockHint: null,
+        request: 'GET /api/connections',
+      },
+    ]);
+  });
+
+  it('publishes nothing for any other failure', async () => {
+    const listener = vi.fn();
+    subscribeToLicenseRequired(listener);
+    const client = new ApiClient({
+      fetchImpl: vi.fn(async () => new Response(null, { status: 500 })),
+    });
+    await client.get('/api/connections').catch(() => undefined);
+    expect(listener).not.toHaveBeenCalled();
+  });
+
+  it('stops delivering after unsubscribe and still rejects the caller', async () => {
+    const listener = vi.fn();
+    subscribeToLicenseRequired(listener)();
+    const client = new ApiClient({
+      fetchImpl: vi.fn(async () => new Response(null, { status: 402 })),
+    });
+    await expect(client.get('/api/connections')).rejects.toMatchObject({ status: 402 });
+    expect(listener).not.toHaveBeenCalled();
+  });
+
+  it('lets the original 402 through even when a subscriber throws', async () => {
+    const good = vi.fn();
+    subscribeToLicenseRequired(() => {
+      throw new Error('subscriber is broken');
+    });
+    subscribeToLicenseRequired(good);
+    const client = new ApiClient({
+      fetchImpl: vi.fn(async () => new Response(null, { status: 402 })),
+    });
+    await expect(client.get('/api/connections')).rejects.toMatchObject({ status: 402 });
+    expect(good).toHaveBeenCalledOnce();
   });
 });
