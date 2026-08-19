@@ -52,3 +52,8 @@ bench/compat-results.txt
 !.vscode/extensions.json
 .DS_Store
 Thumbs.db
+
+# Agent worktrees are created inside the repo by the Claude Code Agent tool. They are full
+# checkouts, so without this an untracked-file sweep or a `git add -A` commits an entire second
+# copy of the tree.
+/.claude/
