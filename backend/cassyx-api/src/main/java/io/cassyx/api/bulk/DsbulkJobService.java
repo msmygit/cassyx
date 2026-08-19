@@ -7,6 +7,9 @@ import io.cassyx.api.bulk.DsbulkDtos.DsbulkJobView;
 import io.cassyx.api.bulk.DsbulkDtos.JobProgressView;
 import io.cassyx.api.bulk.DsbulkDtos.SchemaIdentity;
 import io.cassyx.api.bulk.DsbulkDtos.TableStatistics;
+import io.cassyx.bulk.api.BulkFactory;
+import io.cassyx.bulk.api.CountEngine;
+import io.cassyx.bulk.api.dsbulk.DsbulkCountReport;
 import io.cassyx.bulk.api.dsbulk.DsbulkFactory;
 import io.cassyx.bulk.api.dsbulk.DsbulkJobSpec;
 import io.cassyx.bulk.api.dsbulk.DsbulkListener;
@@ -18,12 +21,14 @@ import io.cassyx.bulk.api.dsbulk.DsbulkProgress;
 import io.cassyx.bulk.api.dsbulk.DsbulkResult;
 import io.cassyx.bulk.api.dsbulk.DsbulkRunner;
 import io.cassyx.core.api.SessionRegistry;
+import io.cassyx.core.api.schema.TableStatisticsStore;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -65,6 +70,7 @@ public class DsbulkJobService {
   private final ObjectMapper json;
   private final Path workRoot;
   private final Clock clock;
+  private final TableStatisticsStore statistics;
 
   private final Map<String, Future<?>> inFlight = new ConcurrentHashMap<>();
   private final Map<String, Path> jobDirectories = new ConcurrentHashMap<>();
@@ -88,7 +94,9 @@ public class DsbulkJobService {
       SessionRegistry sessions,
       ObjectMapper json,
       Path dsbulkJobWorkRoot,
-      Clock clock) {
+      Clock clock,
+      TableStatisticsStore statistics) {
+    this.statistics = statistics;
     this.repository = repository;
     this.events = events;
     this.runner = runner;
@@ -123,6 +131,17 @@ public class DsbulkJobService {
 
   /** Creates a {@code QUEUED} job and hands it to the bounded executor. */
   public DsbulkJobView submit(String connectionId, String name, DsbulkJobSpec spec) {
+    return submit(connectionId, name, spec, null);
+  }
+
+  /**
+   * @param probe the probe the caller already took, reused rather than retaken. The count endpoint
+   *     probes synchronously to decide whether the request is answerable at all (plan section 7.1),
+   *     and probing a second time on the worker thread would risk validating one set of cluster
+   *     facts and running against another.
+   */
+  public DsbulkJobView submit(
+      String connectionId, String name, DsbulkJobSpec spec, DsbulkProbe probe) {
     String jobId = UUID.randomUUID().toString();
     Instant now = clock.instant();
     String type = spec.operation() == DsbulkOperation.LOAD ? "LOAD" : "COUNT";
@@ -131,11 +150,17 @@ public class DsbulkJobService {
     DsbulkJobView queued = view(jobId, type, "QUEUED", spec, connectionId, name, now, null, null, null, null);
     publishStatus(jobId, "QUEUED", null, "Job accepted.");
 
-    inFlight.put(jobId, executor.submit(() -> execute(jobId, type, connectionId, name, spec)));
+    inFlight.put(jobId, executor.submit(() -> execute(jobId, type, connectionId, name, spec, probe)));
     return queued;
   }
 
-  private void execute(String jobId, String type, String connectionId, String name, DsbulkJobSpec spec) {
+  private void execute(
+      String jobId,
+      String type,
+      String connectionId,
+      String name,
+      DsbulkJobSpec spec,
+      DsbulkProbe presetProbe) {
     Instant startedAt = clock.instant();
     Path jobDirectory = workRoot.resolve(jobId);
     jobDirectories.put(jobId, jobDirectory);
@@ -144,7 +169,16 @@ public class DsbulkJobService {
 
     try {
       Files.createDirectories(jobDirectory);
-      DsbulkProbe probe = probe(connectionId, spec.keyspace(), spec.table());
+      DsbulkProbe probe = presetProbe != null
+          ? presetProbe
+          : probe(connectionId, spec.keyspace(), spec.table());
+      if (spec.operation() == DsbulkOperation.COUNT && !probe.supportsTokenRangeScan()) {
+        // Amazon Keyspaces has no token() range scan (plan section 7.1), so DSBulk's count workflow
+        // has no plan it can execute. The total is still answerable by plain paging, and answering
+        // it is better than telling the user their table cannot be counted.
+        nativeCount(jobId, connectionId, spec, startedAt);
+        return;
+      }
       DsbulkPlan plan = DsbulkFactory.plan(spec, probe, jobDirectory, executionId(spec.operation(), jobId));
 
       AtomicLong lastPublish = new AtomicLong();
@@ -219,6 +253,7 @@ public class DsbulkJobService {
     repository.markFinished(jobId, status, finishedAt, result.rowsProcessed(),
         result.failureMessage().isEmpty() ? null : result.failureMessage(),
         settingsDocument(plan, statistics, result.exitCode()));
+    publishStatistics(connectionId, status, statistics);
 
     publishStatus(jobId, status, "RUNNING", result.failureMessage());
     Map<String, Object> completed = new LinkedHashMap<>();
@@ -232,6 +267,76 @@ public class DsbulkJobService {
     LOG.info("DSBulk {} job {} finished {} in {} ms ({} rows, {} failures, exit {})",
         spec.operation(), jobId, status, durationMillis, result.rowsProcessed(), result.failures(),
         result.exitCode());
+  }
+
+  /**
+   * The {@code global} count on a target with no {@code token()} range scan (plan section 7.1).
+   *
+   * <p>The native engine is otherwise internal to cassyx-bulk; this is its one public use. It runs
+   * a single {@code SELECT count(*)} through the driver, which is exactly the "fall back to plain
+   * paging" the capability matrix calls for. The other statistics modes are not degraded to
+   * something cheaper here - they are refused up front by {@link CountJobController}, because a
+   * per-token-range breakdown of a cluster with no token predicate is not a slower answer, it is a
+   * different and wrong one.
+   *
+   * <p>The job row keeps {@code engine='DSBULK'} so cancellation still routes to this service,
+   * which is what owns the future; the settings document records the engine that actually ran.
+   */
+  private void nativeCount(String jobId, String connectionId, DsbulkJobSpec spec, Instant startedAt) {
+    String note = "This target has no token() range scan, so the count runs on the native paging "
+        + "engine instead of DSBulk. Only the total is available.";
+    publishStatus(jobId, "RUNNING", "RUNNING", note);
+
+    CountEngine.CountResult counted = BulkFactory.pagingCountEngine()
+        .count(sessions.session(connectionId), spec.keyspace(), spec.table());
+    Instant finishedAt = clock.instant();
+    long durationMillis = finishedAt.toEpochMilli() - startedAt.toEpochMilli();
+
+    TableStatistics snapshot = TableStatistics.from(
+        new DsbulkCountReport(counted.totalRows(), List.of(), List.of(), List.of()),
+        spec.keyspace(), spec.table(), jobId, finishedAt.toString(), durationMillis);
+
+    Map<String, Object> document = new LinkedHashMap<>();
+    document.put("engine", "NATIVE");
+    document.put("warnings", List.of(note));
+    document.put("statistics", snapshot);
+    repository.markFinished(jobId, "SUCCEEDED", finishedAt, counted.totalRows(), null,
+        serialise(document));
+    publishStatistics(connectionId, "SUCCEEDED", snapshot);
+
+    publishStatus(jobId, "SUCCEEDED", "RUNNING", note);
+    events.complete(jobId, Map.of(
+        "jobId", jobId,
+        "status", "SUCCEEDED",
+        "rowsProcessed", counted.totalRows(),
+        "durationMillis", durationMillis));
+    LOG.info("Native COUNT job {} finished in {} ms ({} rows)", jobId, durationMillis,
+        counted.totalRows());
+  }
+
+  /**
+   * Publishes a finished COUNT into the statistics store - the write the Statistics tab reads.
+   *
+   * <p>This call is the whole feature. Without it the snapshot existed only inside the job's
+   * settings document, {@code GET .../tables/{t}/statistics} answered 404 forever, {@code
+   * TableInfo.statisticsAvailable} was always false, and the tab was stuck on its empty state no
+   * matter how many counts had succeeded.
+   *
+   * <p>Only a SUCCEEDED job is published: a failed or cancelled count has a partial total, and a
+   * partial row count that looks authoritative is worse than none.
+   */
+  private void publishStatistics(String connectionId, String status, TableStatistics snapshot) {
+    if (snapshot == null || !"SUCCEEDED".equals(status)) {
+      return;
+    }
+    try {
+      statistics.put(connectionId, snapshot.toCore());
+    } catch (RuntimeException e) {
+      // The count itself succeeded and is persisted in the job row; a cache write failing must not
+      // turn that into a failed job.
+      LOG.warn("Cannot cache the statistics snapshot for {}: {}",
+          snapshot.identity().qualifiedName(), e.toString());
+    }
   }
 
   /** Exit status 1 means "ran to the end, rejected some records" - a success with a failure count. */
@@ -323,6 +428,10 @@ public class DsbulkJobService {
     if (statistics != null) {
       document.put("statistics", statistics);
     }
+    return serialise(document);
+  }
+
+  private String serialise(Map<String, Object> document) {
     try {
       return json.writeValueAsString(document);
     } catch (RuntimeException | com.fasterxml.jackson.core.JsonProcessingException e) {
@@ -362,7 +471,7 @@ public class DsbulkJobService {
         finishedAt == null ? null : finishedAt.toString(),
         startedAt == null || finishedAt == null ? null : finishedAt.toEpochMilli() - startedAt.toEpochMilli(),
         new JobProgressView(0, null, null, 0, 0, 0, ""),
-        java.util.List.of(),
+        List.of(),
         "/api/jobs/" + jobId + "/events",
         "/api/jobs/" + jobId + "/logs",
         exitCode,

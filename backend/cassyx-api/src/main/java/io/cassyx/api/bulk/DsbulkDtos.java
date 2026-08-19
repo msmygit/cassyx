@@ -150,7 +150,15 @@ public final class DsbulkDtos {
       String createdAt,
       String updatedAt) {}
 
-  /** Contract: {@code TableStatistics}, produced by a successful {@code COUNT} job. */
+  /**
+   * Contract: {@code TableStatistics}, produced by a successful {@code COUNT} job.
+   *
+   * <p>The four {@code *Truncated} / {@code *Reported} fields are additive to the published schema
+   * (which does not forbid extra properties) and are recorded in {@code docs/integration-todo.md}
+   * as a contract addition. They exist because the alternative to capping is a response with three
+   * thousand rows in it, and the alternative to saying the cap applied is a shortened list that
+   * looks exactly like a small cluster.
+   */
   public record TableStatistics(
       SchemaIdentity identity,
       long totalRows,
@@ -160,27 +168,83 @@ public final class DsbulkDtos {
       long durationMillis,
       List<ReplicaRowCount> perReplica,
       List<TokenRangeRowCount> perTokenRange,
-      List<PartitionSize> largestPartitions) {
+      List<PartitionSize> largestPartitions,
+      boolean perReplicaTruncated,
+      Integer perReplicaReported,
+      boolean perTokenRangeTruncated,
+      Integer perTokenRangeReported) {
+
+    /**
+     * Rows kept per detail section.
+     *
+     * <p>DSBulk emits one line per token range and one per node, INCLUDING the empty ones. A
+     * 12-node cluster with 256 vnodes reports ~3000 ranges, so an uncapped snapshot is both a large
+     * response and a table no one can read. Ranges are ranked by row count before the cut, so what
+     * survives is the part that carries the skew signal.
+     */
+    public static final int MAX_DETAIL_ROWS = 500;
 
     /** Tokens stay STRINGS: Murmur3 tokens do not survive a JavaScript number. */
     public static TableStatistics from(
         DsbulkCountReport report, String keyspace, String table, String jobId, String computedAt, long millis) {
+      List<ReplicaRowCount> replicas = report.perReplica().stream()
+          .map(r -> new ReplicaRowCount(r.endpoint(), null, r.rows()))
+          .toList();
+      List<TokenRangeRowCount> ranges = report.perTokenRange().stream()
+          .sorted((a, b) -> Long.compare(b.rows(), a.rows()))
+          .map(r -> new TokenRangeRowCount(r.start(), r.end(), r.rows(), List.of()))
+          .toList();
+
       return new TableStatistics(
           new SchemaIdentity("TABLE", keyspace, table, keyspace + "." + table),
           report.totalRows(),
-          report.largestPartitions().isEmpty() ? null : (long) report.largestPartitions().size(),
+          // NOT largestPartitions().size(): that is the top-N cap, so it reported the constant 10
+          // as though it were a measurement. DSBulk's count workflow has no total-partitions
+          // figure, and null is the honest answer (the contract types it nullable for this).
+          null,
           computedAt,
           jobId,
           millis,
-          report.perReplica().stream()
-              .map(r -> new ReplicaRowCount(r.endpoint(), null, r.rows()))
-              .toList(),
-          report.perTokenRange().stream()
-              .map(r -> new TokenRangeRowCount(r.start(), r.end(), r.rows(), List.of()))
-              .toList(),
+          cap(replicas),
+          cap(ranges),
           report.largestPartitions().stream()
               .map(p -> new PartitionSize(p.partitionKey(), p.rows(), null))
-              .toList());
+              .toList(),
+          replicas.size() > MAX_DETAIL_ROWS,
+          replicas.size(),
+          ranges.size() > MAX_DETAIL_ROWS,
+          ranges.size());
+    }
+
+    private static <T> List<T> cap(List<T> rows) {
+      return rows.size() <= MAX_DETAIL_ROWS ? rows : List.copyOf(rows.subList(0, MAX_DETAIL_ROWS));
+    }
+
+    /** The persisted, contract-facing shape mapped onto the core snapshot the schema tab serves. */
+    public io.cassyx.core.api.schema.TableStatistics toCore() {
+      return new io.cassyx.core.api.schema.TableStatistics(
+          io.cassyx.core.api.schema.SchemaIdentity.table(identity.keyspace(), identity.table()),
+          totalRows,
+          partitionCount,
+          computedAt == null ? null : java.time.Instant.parse(computedAt),
+          jobId,
+          durationMillis,
+          perReplica.stream()
+              .map(r -> new io.cassyx.core.api.schema.ReplicaRowCount(
+                  r.endpoint(), r.datacenter(), r.rows()))
+              .toList(),
+          perTokenRange.stream()
+              .map(r -> new io.cassyx.core.api.schema.TokenRangeRowCount(
+                  r.start(), r.end(), r.rows(), r.replicas()))
+              .toList(),
+          largestPartitions.stream()
+              .map(p -> new io.cassyx.core.api.schema.PartitionSize(
+                  p.partitionKey(), p.rows(), p.sizeBytes()))
+              .toList(),
+          perReplicaTruncated,
+          perReplicaReported,
+          perTokenRangeTruncated,
+          perTokenRangeReported);
     }
   }
 

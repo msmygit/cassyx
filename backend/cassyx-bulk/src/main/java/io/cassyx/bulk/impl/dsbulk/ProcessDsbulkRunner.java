@@ -51,6 +51,14 @@ public final class ProcessDsbulkRunner implements DsbulkRunner {
   /** Main class of {@code dsbulk-runner}, used when the distribution's launcher is not executable. */
   public static final String MAIN_CLASS = "com.datastax.oss.dsbulk.runner.DataStaxBulkLoader";
 
+  /**
+   * Pinned on the child JVM rather than inherited from the host. DSBulk formats the count report's
+   * percentage column with {@code "%.2f"} and no explicit {@code Locale}, so on a comma-decimal host
+   * it emits {@code "33,33"} - which the parser's grouping-separator handling then reads as the
+   * integer {@code 3333}. Nothing about a row count should depend on the server's regional settings.
+   */
+  private static final List<String> LOCALE_ARGS = List.of("-Duser.language=en", "-Duser.country=US");
+
   /** Grace between SIGTERM and SIGKILL: enough for DSBulk to flush its error reports. */
   public static final Duration DEFAULT_KILL_GRACE = Duration.ofSeconds(10);
 
@@ -122,7 +130,13 @@ public final class ProcessDsbulkRunner implements DsbulkRunner {
     // reader thread suffices: a second pipe nobody drains blocks the child the moment its buffer
     // fills.
     builder.redirectOutput(ProcessBuilder.Redirect.to(stdoutFile.toFile()));
-    builder.environment().put("DSBULK_JAVA_OPTS", "-Xmx" + maxHeap);
+    // The locale is pinned, not inherited. DSBulk formats the count report's percentage column with
+    // "%.2f" and no explicit Locale, so on a host set to a comma-decimal locale it emits "33,33" -
+    // which the parser's grouping-separator handling then reads as the integer 3333. Nothing about a
+    // row count should depend on the server's regional settings.
+    builder
+        .environment()
+        .put("DSBULK_JAVA_OPTS", "-Xmx" + maxHeap + " " + String.join(" ", LOCALE_ARGS));
     if (distribution != null && distribution.home() != null) {
       builder.environment().put(DsbulkDistribution.HOME_ENV, distribution.home().toString());
     }
@@ -392,6 +406,8 @@ public final class ProcessDsbulkRunner implements DsbulkRunner {
     List<String> command = new ArrayList<>();
     command.add(javaExecutable());
     command.add("-Xmx" + maxHeap);
+    // Same reason as DSBULK_JAVA_OPTS above: the count report is locale-formatted.
+    command.addAll(LOCALE_ARGS);
     command.add("-cp");
     command.add(classpath());
     command.add(MAIN_CLASS);

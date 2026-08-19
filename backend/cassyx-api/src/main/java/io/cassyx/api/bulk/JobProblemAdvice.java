@@ -25,10 +25,33 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
  * lifecycle - cancel it first, or wait for it to succeed", and {@code 429} means "retry when a slot
  * frees up" rather than "your request was wrong".
  */
-@RestControllerAdvice(assignableTypes = {JobController.class, UnloadJobController.class})
+@RestControllerAdvice(
+    assignableTypes = {JobController.class, UnloadJobController.class, CountJobController.class})
 public class JobProblemAdvice {
 
   private static final String BASE = "https://cassyx.dev/problems/";
+
+  /**
+   * A statistics mode this table or target cannot produce (plan sections 5.4, 7.1).
+   *
+   * <p>422, and the refused modes are named in an extension member so the UI can retry with exactly
+   * the rest rather than making the user guess which one was the problem.
+   */
+  @ExceptionHandler(CountModeUnsupportedException.class)
+  public ResponseEntity<ProblemDetail> unsupportedCountMode(
+      CountModeUnsupportedException e, HttpServletRequest request) {
+    ResponseEntity<ProblemDetail> response = problem(
+        HttpStatus.UNPROCESSABLE_ENTITY,
+        "Statistics mode not supported",
+        "count-mode-unsupported",
+        e.getMessage(),
+        request);
+    ProblemDetail body = response.getBody();
+    if (body != null) {
+      body.setProperty("modes", e.modes());
+    }
+    return response;
+  }
 
   @ExceptionHandler(JobNotFoundException.class)
   public ResponseEntity<ProblemDetail> notFound(

@@ -357,10 +357,14 @@ public final class DsbulkDefaults {
     if (spec.operation() != DsbulkOperation.COUNT) {
       return;
     }
-    put(out, "stats.modes", renderList(normaliseStatsModes(spec.statsModes())),
+    List<String> modes = normaliseStatsModes(spec.statsModes());
+    put(out, "stats.modes", renderList(modes),
         "The statistics the Statistics tab renders: total, per-replica, per-token-range and the "
             + "top-N largest partitions (plan section 5.4).");
-    if (spec.statsModes().contains("partitions") || spec.statsModes().contains("biggest-partitions")) {
+    // Read off the NORMALISED modes: the contract spells the largest-partitions report
+    // `biggest-partitions`, and matching the raw spelling missed `stats.numPartitions` for exactly
+    // the requests that needed it.
+    if (modes.contains("partitions")) {
       put(out, "stats.numPartitions", Integer.toString(spec.topPartitions()),
           "Top-" + spec.topPartitions() + " largest partitions - the skew signal that decides how "
               + "far to oversplit a later unload of this table.");

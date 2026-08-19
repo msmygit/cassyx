@@ -3,6 +3,7 @@ import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, useRoutes } from 'react-router';
 import { renderWithProviders } from '../test/render';
+import { AppError } from '../api/errors';
 import { LicenseGate } from '../license/LicenseGate';
 import { WorkspaceProvider } from '../layout/WorkspaceProvider';
 import { placeholderCatalog } from '../schema/placeholderCatalog';
@@ -20,10 +21,19 @@ vi.mock('../schema/schemaApi', async (importOriginal) => ({
   getTableStatistics: (...args: unknown[]) => getTableStatistics(...args) as unknown,
 }));
 
-vi.mock('../bulk/dsbulk/dsbulkApi', async (importOriginal) => ({
-  ...(await importOriginal<typeof DsbulkApi>()),
-  listJobTemplates: async () => [],
-}));
+const createCountJob = vi.fn();
+
+vi.mock('../bulk/dsbulk/dsbulkApi', async (importOriginal) => {
+  const original = await importOriginal<typeof DsbulkApi>();
+  return {
+    ...original,
+    listJobTemplates: async () => [],
+    defaultDsbulkApi: {
+      ...original.defaultDsbulkApi,
+      createCountJob: (...args: unknown[]) => createCountJob(...args) as unknown,
+    },
+  };
+});
 
 const licensed: LicenseStatus = {
   licensed: true,
@@ -86,7 +96,41 @@ beforeEach(() => {
     statisticsAvailable: false,
   }));
   getTableStatistics.mockResolvedValue(null);
+  createCountJob.mockResolvedValue({ id: 'job-1', status: 'QUEUED' });
 });
+
+/** The FIELDS payload for a table that does have a clustering column. */
+function clusteredTable(keyspace: string, table: string) {
+  return {
+    identity: { kind: 'TABLE', keyspace, table, qualifiedName: `${keyspace}.${table}` },
+    fields: [
+      {
+        identity: { kind: 'COLUMN', keyspace, table, column: 'id' },
+        name: 'id',
+        type: 'uuid',
+        kind: 'PARTITION_KEY',
+      },
+      {
+        identity: { kind: 'COLUMN', keyspace, table, column: 'created_at' },
+        name: 'created_at',
+        type: 'timestamp',
+        kind: 'CLUSTERING',
+      },
+    ],
+    indexes: [],
+    definition: `CREATE TABLE ${keyspace}.${table} (id uuid, created_at timestamp, PRIMARY KEY (id, created_at));`,
+    statisticsAvailable: false,
+  };
+}
+
+/** Selects demo.orders and lands on the statistics route. */
+async function openStatistics(user: ReturnType<typeof userEvent.setup>) {
+  renderShell({ entries: ['/'] });
+  await user.click(screen.getByText('demo'));
+  await user.click(screen.getByText('orders'));
+  await user.click(screen.getByRole('button', { name: /^statistics$/i }));
+  return screen.findByTestId('statistics-page');
+}
 
 describe('workspace route', () => {
   it('renders the connected query workspace, not a disconnected editor/grid pair', () => {
@@ -166,6 +210,81 @@ describe('jobs, load and statistics routes', () => {
     expect(await screen.findByTestId('statistics-page')).toBeInTheDocument();
     await waitFor(() =>
       expect(getTableStatistics).toHaveBeenCalledWith('conn-1', 'demo', 'orders'),
+    );
+  }, 20_000);
+
+  it('states the cost before starting a count, and does not start one on the first click', async () => {
+    const user = userEvent.setup();
+    await openStatistics(user);
+
+    await user.click(screen.getByTestId('recalculate-statistics'));
+
+    expect(await screen.findByTestId('statistics-confirm')).toBeInTheDocument();
+    expect(screen.getByText(/full table scan/i)).toBeInTheDocument();
+    // A cluster-wide scan must not be one click away from a button labelled "Recalculate".
+    expect(createCountJob).not.toHaveBeenCalled();
+  }, 20_000);
+
+  it('omits the partitions mode on a table with no clustering column, and says why', async () => {
+    const user = userEvent.setup();
+    await openStatistics(user);
+
+    await user.click(screen.getByTestId('recalculate-statistics'));
+    expect(await screen.findByTestId('statistics-partitions-unavailable')).toBeInTheDocument();
+    await user.click(screen.getByTestId('statistics-confirm-run'));
+
+    // `partitions` needs a clustering column - DSBulk throws at workflow init otherwise, and the
+    // job used to fail minutes later with nothing legible to show for it.
+    await waitFor(() =>
+      expect(createCountJob).toHaveBeenCalledWith('conn-1', {
+        keyspace: 'demo',
+        table: 'orders',
+        modes: ['global', 'ranges'],
+        topPartitions: 10,
+      }),
+    );
+  }, 20_000);
+
+  it('asks for the partitions mode when the table actually has a clustering column', async () => {
+    getTableInfo.mockImplementation(async (_id: string, keyspace: string, table: string) =>
+      clusteredTable(keyspace, table),
+    );
+    const user = userEvent.setup();
+    await openStatistics(user);
+
+    await user.click(screen.getByTestId('recalculate-statistics'));
+    expect(screen.queryByTestId('statistics-partitions-unavailable')).not.toBeInTheDocument();
+    await user.click(screen.getByTestId('statistics-confirm-run'));
+
+    await waitFor(() =>
+      expect(createCountJob).toHaveBeenCalledWith(
+        'conn-1',
+        expect.objectContaining({ modes: ['global', 'ranges', 'partitions'] }),
+      ),
+    );
+  }, 20_000);
+
+  it("shows the server's reason when a mode is refused, not a generic failure", async () => {
+    createCountJob.mockRejectedValue(
+      new AppError('Request failed', {
+        kind: 'http',
+        status: 422,
+        problem: {
+          type: 'https://cassyx.dev/problems/count-mode-unsupported',
+          title: 'Statistics mode not supported',
+          status: 422,
+          detail: 'demo.orders has no clustering column, so the partitions mode cannot run.',
+        },
+      }),
+    );
+    const user = userEvent.setup();
+    await openStatistics(user);
+
+    await user.click(screen.getByTestId('recalculate-statistics'));
+    await user.click(screen.getByTestId('statistics-confirm-run'));
+
+    expect(await screen.findByTestId('statistics-error')).toHaveTextContent(
+      /no clustering column/i,
     );
   }, 20_000);
 });

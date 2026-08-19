@@ -134,7 +134,8 @@ class JobEndpointsTest {
             new DisconnectedSessions(),
             mapper,
             artifactRoot,
-            Clock.systemUTC());
+            Clock.systemUTC(),
+            new JobRowTableStatisticsStore(new DsbulkJobRepository(jdbc), mapper));
     jobs =
         new JobService(
             repository,

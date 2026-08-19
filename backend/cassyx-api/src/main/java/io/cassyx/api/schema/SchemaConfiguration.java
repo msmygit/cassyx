@@ -5,7 +5,6 @@ import io.cassyx.core.api.schema.DdlGenerator;
 import io.cassyx.core.api.schema.RoleReader;
 import io.cassyx.core.api.schema.SchemaFactory;
 import io.cassyx.core.api.schema.SchemaReader;
-import io.cassyx.core.api.schema.TableStatisticsStore;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -40,15 +39,14 @@ public class SchemaConfiguration {
     return SchemaFactory.roleReader();
   }
 
-  /**
-   * Statistics snapshots produced by the COUNT job (plan section 5.4).
+  /*
+   * There is deliberately no TableStatisticsStore bean here any more.
    *
-   * <p>Empty until workstream E writes to it, which is precisely the contract's "no statistics
-   * computed yet" 404 on the STATISTICS tab. When workstream E supplies a durable store it
-   * replaces this bean.
+   * The in-memory one this configuration used to publish was never written to by anything, so the
+   * STATISTICS tab 404'd forever; and even once written to it would have lost every snapshot on
+   * restart while the job row that produced it survived. The durable, job-row-backed store in
+   * io.cassyx.api.bulk.JobRowTableStatisticsStore is the single bean now. Publishing a second one
+   * here would make the injection ambiguous and fail the context at start-up - which is the
+   * intended outcome if someone reintroduces the placeholder.
    */
-  @Bean
-  public TableStatisticsStore tableStatisticsStore() {
-    return SchemaFactory.tableStatisticsStore();
-  }
 }
