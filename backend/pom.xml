@@ -28,11 +28,26 @@
     <!-- 3.5.16, not 3.5.4. The first complete Dependency-Check aggregate run surfaced 7 findings
          against spring-boot 3.5.4 (worst CVE-2026-40974, 9.8), 21 against the spring-core 6.2.9 it
          pulls (worst CVE-2026-41855, 9.8) and 30 against tomcat-embed-core 10.1.43 (worst
-         CVE-2026-43512 / CVE-2026-41293, 9.8 each). One Boot bump clears all three: 3.5.16 manages
-         spring-framework 6.2.19 and tomcat 10.1.55, and OSV reports all three artifacts clean at
-         those versions. Deliberately staying on the 3.5.x maintenance line - 4.1.x is the current
-         release line but a major-line jump is not this change. -->
+         CVE-2026-43512 / CVE-2026-41293, 9.8 each). One Boot bump clears spring-boot and
+         spring-core outright: 3.5.16 manages spring-framework 6.2.19. Deliberately staying on the
+         3.5.x maintenance line - 4.1.x is the current release line but a major-line jump is not
+         this change. -->
     <spring-boot.version>3.5.16</spring-boot.version>
+    <!-- Overrides the 10.1.55 Boot 3.5.16 manages. Applied via explicit <dependencyManagement>
+         entries below, NOT by this property alone - see the comment there.
+
+         10.1.55 was NOT clean: the scan still reported CVE-2026-55276, CVE-2026-53434,
+         CVE-2026-59083, CVE-2026-59084 (9.1 each), CVE-2026-53404 (7.3) and CVE-2026-66299 (7.5).
+         All but the last are fixed in 10.1.57.
+
+         Worth recording why the earlier OSV check missed these: OSV carries no Maven range for any
+         of them, so an OSV lookup reports the artifact clean. Dependency-Check matches CPEs against
+         NVD, which does carry the ranges. The two sources disagree, and for a CVE gate NVD is the
+         one that decides. Verify tomcat and friends against NVD directly, not OSV alone.
+
+         CVE-2026-66299 is fixed only in 10.1.58, which is not on Maven Central yet. It does not
+         apply to us and is suppressed with the evidence in dependency-check-suppressions.xml. -->
+    <tomcat.version>10.1.57</tomcat.version>
     <java-driver.version>4.19.3</java-driver.version>
     <stripe.version>33.3.0</stripe.version>
     <dsbulk.version>1.11.2</dsbulk.version>
@@ -239,6 +254,29 @@
         <version>${log4j2.version}</version>
         <type>pom</type>
         <scope>import</scope>
+      </dependency>
+
+      <!-- Embedded Tomcat, pinned ahead of Spring Boot's BOM for the same first-declaration-wins
+           reason as the BOMs above. There is no tomcat-bom, and setting <tomcat.version> does
+           NOT work here: that property is only honoured when spring-boot-starter-parent is the
+           real parent POM. With an imported BOM the property is resolved inside the BOM, so the
+           override is silently ignored - confirmed by dependency:tree still reporting 10.1.55
+           after the property was set. All three artifacts must be listed; managing only -core
+           would leave -el and -websocket behind at Boot's version. -->
+      <dependency>
+        <groupId>org.apache.tomcat.embed</groupId>
+        <artifactId>tomcat-embed-core</artifactId>
+        <version>${tomcat.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.tomcat.embed</groupId>
+        <artifactId>tomcat-embed-el</artifactId>
+        <version>${tomcat.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.tomcat.embed</groupId>
+        <artifactId>tomcat-embed-websocket</artifactId>
+        <version>${tomcat.version}</version>
       </dependency>
 
       <dependency>
