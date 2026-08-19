@@ -60,6 +60,87 @@ cp licensing/.env.example licensing/.env
 Every variable is documented in that file. The defaults run end to end with no accounts at all:
 email provider `log` writes the whole message (key included) to the service log.
 
+### 2.1 Email delivery
+
+`CASSYX_LICENSING_EMAIL_PROVIDER` picks the sender. There are two, and an unrecognised value
+**fails startup** rather than falling back, because a silent fallback to `log` looks exactly like a
+service that is emailing every customer correctly.
+
+| Value | What it does |
+| --- | --- |
+| `log` (default) | Writes the whole email, licence key included, to the service log. Development only. |
+| `smtp` | Sends it. Both a plain-text and an HTML body, content differing per purchase / trial / re-send. |
+
+**Why SMTP and not a vendor SDK.** Postmark, SES, Resend, Mailgun, Fastmail and Gmail all speak
+SMTP, so one implementation covers whichever one you pick, and moving between them is a change to
+four environment variables rather than a code change and a redeploy. It also adds no vendor SDK -
+no HTTP client, no credential library, no transitive dependency tree - to the one service in this
+repository that holds the Ed25519 private key.
+
+Full variable list, all with defaults, all documented inline in `.env.example`:
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `CASSYX_LICENSING_EMAIL_PROVIDER` | `log` | `log` or `smtp`; anything else fails startup. |
+| `CASSYX_LICENSING_EMAIL_FROM` | `licensing@cassyx.dev` | Must be a domain you control. See below. |
+| `CASSYX_LICENSING_EMAIL_FROM_NAME` | `cassyx` | Display name. A bare address reads as machine spam. |
+| `CASSYX_LICENSING_EMAIL_REPLY_TO` | `support@cassyx.dev` | Where a stuck buyer's reply lands. |
+| `CASSYX_LICENSING_EMAIL_SUBJECT` | `Your cassyx licence key` | Purchase subject; trial and re-send are derived from it. |
+| `CASSYX_LICENSING_PURCHASE_URL` | *(blank)* | Shown in trial emails. Blank omits the line. |
+| `CASSYX_LICENSING_RECOVERY_URL` | *(blank)* | Shown in purchase and re-send emails. Blank omits the line. |
+| `CASSYX_LICENSING_SMTP_HOST` | *(blank)* | Required when provider is `smtp`. |
+| `CASSYX_LICENSING_SMTP_PORT` | `587` | `465` with `ssl`. |
+| `CASSYX_LICENSING_SMTP_USERNAME` | *(blank)* | Blank disables SMTP AUTH entirely. |
+| `CASSYX_LICENSING_SMTP_PASSWORD` | *(blank)* | Never logged, never echoed in an error. |
+| `CASSYX_LICENSING_SMTP_TLS` | `starttls` | `starttls` (587), `ssl` (implicit TLS, 465), `none` (local test server only). |
+| `CASSYX_LICENSING_SMTP_CONNECT_TIMEOUT_MS` | `10000` | |
+| `CASSYX_LICENSING_SMTP_READ_TIMEOUT_MS` | `15000` | |
+| `CASSYX_LICENSING_SMTP_WRITE_TIMEOUT_MS` | `15000` | |
+| `CASSYX_LICENSING_SMTP_MAX_ATTEMPTS` | `3` | Total attempts, including the first. |
+| `CASSYX_LICENSING_SMTP_RETRY_DELAY_MS` | `500` | Pause between attempts. |
+
+The three timeouts are not decoration. Jakarta Mail defaults every one of them to **infinite**, and
+this send happens inside the Stripe webhook handler: one hung SMTP connection would stall
+fulfilment for every buyer queued behind it, and Stripe would start redelivering the webhook on top
+of that. Failing is recoverable (the key is already persisted, and `POST /licensing/recover` exists);
+hanging is not.
+
+Retries are bounded and only cover transient failures. A permanent rejection - bad credentials, a
+rejected recipient, any 5xx SMTP reply - is not retried at all, because it cannot succeed on the
+second try and a loop would turn one typo into a sustained hammering of the provider. On giving up,
+the sender throws, the licence is recorded as undelivered, and `POST /licensing/deliveries/retry`
+or `POST /licensing/recover` picks it up.
+
+### 2.2 Deliverability: the part that bites operators
+
+**Licence email landing in spam is indistinguishable, from the buyer's side, from not sending it at
+all.** They paid, nothing arrived, and they open a ticket or a chargeback. Everything below is a
+prerequisite for taking money, not a nice-to-have.
+
+* **Send from a domain you control, and authenticate it.** `CASSYX_LICENSING_EMAIL_FROM` must be on
+  a domain whose DNS you can edit. A From address on someone else's domain (a Gmail address, a
+  customer's domain, anything you have not authenticated) fails DMARC at the recipient and is
+  rejected or spam-foldered. This is the single most common reason transactional mail vanishes.
+* **SPF** - a DNS TXT record on the sending domain listing who may send for it, e.g.
+  `v=spf1 include:spf.example-provider.com -all`. Your provider gives you the exact `include:`.
+  End with `-all`, not `~all`, once you are sure the list is complete.
+* **DKIM** - your provider gives you a public key to publish as a TXT record at
+  `<selector>._domainkey.<your-domain>`; it then signs every message with the private half. DKIM is
+  the one that survives forwarding, which SPF does not, so do not skip it because SPF passes.
+* **DMARC** - a TXT record at `_dmarc.<your-domain>`, e.g.
+  `v=DMARC1; p=none; rua=mailto:dmarc@<your-domain>`. Start at `p=none` and read the aggregate
+  reports for a week or two, then move to `p=quarantine` and `p=reject`. Gmail and Yahoo now
+  **require** a DMARC record for bulk senders, and treat its absence as a negative signal even
+  below their volume thresholds.
+* **Verify before you sell anything.** Send a purchase email to a Gmail address, an Outlook address
+  and one corporate address, and check the raw headers for `spf=pass`, `dkim=pass` and
+  `dmarc=pass`. Anything less than three passes is a licence key you are about to lose.
+* **Do not send from a bare VPS on port 25.** Consumer and cloud IP ranges are blocked wholesale.
+  Use a provider whose IPs have a reputation, which is most of what you are paying them for.
+* **Watch for the undelivered log line** (below). It is the only signal you get that any of this is
+  wrong, and it does not fire when the message is accepted by the provider and then filed as spam -
+  which is why the checks above happen before the first sale, not after the first complaint.
+
 ## 3. Run locally against a Stripe sandbox
 
 No Stripe registration is required:
@@ -109,10 +190,10 @@ Deployment notes that are not optional:
   payment happened; only this database knows what it produced, and recovery depends on it.
 * Watch for `LICENCE ... WAS MINTED BUT NOT DELIVERED` in the log. That means someone paid and has
   not received their key. `POST /licensing/deliveries/retry` re-attempts every such case.
-* Email is a stub. `LicenseEmailSender` has exactly one implementation (`log`); a real provider is
-  a new implementation of that interface plus one line in `LicensingConfiguration`. An unknown
-  `CASSYX_LICENSING_EMAIL_PROVIDER` fails startup rather than quietly falling back to logging, so
-  nobody believes customers are being emailed when they are not.
+* **Set `CASSYX_LICENSING_EMAIL_PROVIDER=smtp` before the first sale**, and work through §2.2. The
+  `log` default mints correct keys and delivers none of them. An unknown provider value fails
+  startup rather than quietly falling back to logging, so nobody believes customers are being
+  emailed when they are not.
 
 ## Tests
 
@@ -123,3 +204,8 @@ mvn -B -f backend/pom.xml -Plicensing -pl ../licensing -am test
 `MintVerifyRoundTripTest` is the one to protect: it mints a key here and verifies it through the
 real `Ed25519LicenseVerifier` that ships in the product. If it ever goes red, every licence sold
 since it broke is worthless to the customer holding it.
+
+`SmtpLicenseEmailSenderTest` is the other one. It runs against **GreenMail**, a real in-process
+SMTP server, rather than a mocked `JavaMailSender`: a mock proves a method was called, which is not
+the question. The question is whether the message survives an actual SMTP conversation with the key
+intact in both body parts, and only a server answers that.

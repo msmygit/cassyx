@@ -23,6 +23,11 @@
          ${project.basedir} form and sit inside the reactor. This module deliberately sits
          outside backend/, so it has to spell the path out relative to itself. -->
     <checkstyle.config.path>${project.basedir}/../backend/config/checkstyle.xml</checkstyle.config.path>
+    <!-- In-process SMTP server for the delivery tests. Version checked against OSV before pinning
+         (`curl -s https://api.osv.dev/v1/query -d '{"package":{"name":"com.icegreen:greenmail",
+         "ecosystem":"Maven"},"version":"2.1.12"}'` returns no vulnerabilities), because this repo
+         fails the build at CVSS 7 and has a history of pins that looked fine and were not. -->
+    <greenmail.version>2.1.12</greenmail.version>
   </properties>
 
   <dependencies>
@@ -51,10 +56,35 @@
       <scope>runtime</scope>
     </dependency>
 
+    <!-- SMTP delivery. Chosen over any vendor API SDK because every provider an operator might
+         pick speaks SMTP, so switching provider is an env-var change; see SmtpLicenseEmailSender. -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-mail</artifactId>
+    </dependency>
+
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-test</artifactId>
       <scope>test</scope>
+    </dependency>
+    <!-- A real SMTP server in-process. Mocking JavaMailSender would prove a method was called, not
+         that a message survives an SMTP conversation intact - which is the only thing that matters
+         when the message IS the thing the customer paid for. -->
+    <dependency>
+      <groupId>com.icegreen</groupId>
+      <artifactId>greenmail</artifactId>
+      <version>${greenmail.version}</version>
+      <scope>test</scope>
+      <exclusions>
+        <!-- GreenMail publishes junit 4 in COMPILE scope for its JUnit 4 rule, which we do not use.
+             Left in, it would drag a second test framework onto the test classpath and into the
+             CVE scan for no benefit. -->
+        <exclusion>
+          <groupId>junit</groupId>
+          <artifactId>junit</artifactId>
+        </exclusion>
+      </exclusions>
     </dependency>
   </dependencies>
 
