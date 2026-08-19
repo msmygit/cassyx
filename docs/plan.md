@@ -123,7 +123,7 @@ cassyx/
 | Component | Version | Note |
 | --- | --- | --- |
 | Java | 21 LTS | virtual threads for per-range scan tasks |
-| Spring Boot | 3.5.16 | stays on the 3.5.x maintenance line; carries spring-framework 6.2.19 + tomcat 10.1.55 |
+| Spring Boot | 3.5.16 | stays on the 3.5.x maintenance line; carries spring-framework 6.2.19. Tomcat is overridden to 10.1.57, above the 10.1.55 Boot manages |
 | `java-driver-core` | 4.19.3 | ASF-owned; `CqlVector` since 4.16, vector in QueryBuilder via JAVA-3118 |
 | DSBulk | 1.11.2 | `com.datastax.oss:dsbulk-runner` |
 | React | 19 | |
@@ -141,7 +141,8 @@ vulnerability; lowering any of them re-opens the listed findings.
 
 | Pin | Version | Clears |
 | --- | --- | --- |
-| `spring-boot` | 3.5.16 | 7 findings on 3.5.4 (CVE-2026-40974 9.8 worst), 21 on spring-core 6.2.9, 30 on tomcat-embed-core 10.1.43 |
+| `spring-boot` | 3.5.16 | 7 findings on 3.5.4 (CVE-2026-40974 9.8 worst), 21 on spring-core 6.2.9, 24 of the 30 on tomcat-embed-core 10.1.43 |
+| `tomcat` | 10.1.57 | the 6 tomcat findings Boot's own 10.1.55 does **not** clear: CVE-2026-55276 / 53434 / 59083 / 59084 (9.1 each), CVE-2026-53404 (7.3). Needs explicit `<dependencyManagement>` entries for `-core`, `-el` and `-websocket`: `<tomcat.version>` alone is ignored under an imported BOM. CVE-2026-66299 is fixed only in the unreleased 10.1.58 and is suppressed (it is in the examples webapp, which the embedded jar does not contain) |
 | `jackson-bom` | 2.22.2 | CVE-2026-54512/54513 (8.1); Boot 3.5.16's own 2.21.4 is still affected by CVE-2026-54515/59889 |
 | `netty-bom` | 4.1.137.Final | maintenance line, ahead of Boot's 4.1.135.Final |
 | `logback` | 1.5.34 | CVE-2023-6378 floor; 1.5.18 held logback *below* Boot's own version |
@@ -619,6 +620,29 @@ Keyspaces in particular needs the bulk path to fall back from token-range scan t
 ## 9. Monetization: one-time Stripe payment
 
 Per the decision: **one paid tier, everything included, one-time payment, plus a bypass flag.**
+
+### 9.0 Distribution licence
+
+Cassyx is distributed under the **Elastic License 2.0** (ELv2); see `LICENSE` at the repository
+root. Source-available, not OSI-approved: anyone can read, self-host, and modify it, but ELv2's
+Limitations clause specifically prohibits (a) offering it to third parties as a hosted or managed
+service, (b) moving, changing, disabling, or circumventing the licence-key functionality (or
+removing/obscuring any feature that functionality protects), and (c) altering or removing licensing
+or copyright notices.
+
+Clause (b) is why ELv2 replaced an earlier, mistaken MIT licensing of this repository: MIT grants
+unrestricted rights to redistribute a modified fork with the §9.1 licence check deleted, which makes
+the entire monetization model in this section unenforceable as a matter of law. ELv2 does not change
+anything about how §9.1 (the Ed25519 key gate) or §9.2 (the sanctioned bypass) work technically. The
+sanctioned bypass remains a legitimate, in-licence route for development, CI, evaluation and
+enterprise site deployments. What ELv2 adds is that stripping or circumventing the gate outside of
+those sanctioned uses is now also a licence violation, not just a code change someone could make.
+
+Be plain about what this does and does not do: **a licence is a legal control, not a technical
+one.** ELv2 does not make self-hosted software tamper-proof; nothing running on hardware the
+licensee controls can be. It raises the cost and consequence of bypass (breach of contract, loss of
+licence, potential liability) without pretending to prevent it outright. The Ed25519 signing scheme
+in §9.1 remains the technical control; ELv2 is what makes defeating it something other than free.
 
 ### 9.1 Enforcement model
 

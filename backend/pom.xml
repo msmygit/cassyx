@@ -11,6 +11,15 @@
   <name>cassyx-parent</name>
   <description>cassyx - Cassandra / DSE / Astra data manager. Maven multi-module parent.</description>
 
+  <licenses>
+    <license>
+      <name>Elastic License 2.0</name>
+      <url>https://www.elastic.co/licensing/elastic-license</url>
+      <distribution>repo</distribution>
+      <comments>Source-available, not OSI-approved. See the LICENSE file at the repository root.</comments>
+    </license>
+  </licenses>
+
   <modules>
     <module>cassyx-core</module>
     <module>cassyx-bulk</module>
