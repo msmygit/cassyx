@@ -317,6 +317,15 @@ paths:
             application/problem+json:
               schema:
                 $ref: "#/components/schemas/Problem"
+        "500":
+          description: |
+            The event was verified but fulfillment failed (for example the licensing service was
+            unreachable). The `event.id` claim is released, so Stripe's next retry is processed
+            rather than swallowed as a duplicate — retrying is the correct client behaviour here.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
 
   ##########################################################################
   # connections (§3)

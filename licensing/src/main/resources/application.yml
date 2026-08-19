@@ -1,0 +1,54 @@
+# cassyx licensing service (plan sections 9.1, 9.3, 9.4).
+#
+# Every secret here is a PLACEHOLDER. Real values come from the environment - see
+# licensing/.env.example. Nothing in this file may ever contain a live key: the private key alone
+# is enough to mint free licences forever.
+
+spring:
+  application:
+    name: cassyx-licensing
+  threads:
+    virtual:
+      enabled: true
+  datasource:
+    url: jdbc:h2:file:${CASSYX_LICENSING_DB_PATH:./data/licensing};DB_CLOSE_ON_EXIT=FALSE
+    driver-class-name: org.h2.Driver
+    username: ${CASSYX_LICENSING_DB_USER:licensing}
+    password: ${CASSYX_LICENSING_DB_PASSWORD:licensing}
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+server:
+  port: ${CASSYX_LICENSING_PORT:8090}
+  shutdown: graceful
+
+logging:
+  level:
+    io.cassyx: ${CASSYX_LOG_LEVEL:INFO}
+
+cassyx:
+  licensing:
+    # PRIVATE half of the Ed25519 pair. NEVER ships in the product image (plan section 9.1).
+    private-key:    ${CASSYX_LICENSING_PRIVATE_KEY:PLACEHOLDER}
+    # PUBLIC half, so every minted key is verified before it is emailed.
+    public-key:     ${CASSYX_LICENSE_PUBLIC_KEY:PLACEHOLDER}
+    trial-days:     ${CASSYX_LICENSING_TRIAL_DAYS:14}
+    # Purchased major version written into `scope` (plan section 9.5). 0 omits the field, which
+    # means "unrestricted" - start there and turn it on when you are ready to enforce upgrades.
+    scope:          ${CASSYX_LICENSING_SCOPE:0}
+    payload-version: ${CASSYX_LICENSING_PAYLOAD_VERSION:1}
+    seats:          ${CASSYX_LICENSING_SEATS:1}
+    # Shared secret cassyx-api sends as X-Cassyx-Licensing-Token on internal endpoints.
+    token:          ${CASSYX_LICENSING_TOKEN:PLACEHOLDER}
+    stripe:
+      secret-key:     ${STRIPE_SECRET_KEY:rk_test_PLACEHOLDER}
+      webhook-secret: ${STRIPE_WEBHOOK_SECRET:whsec_PLACEHOLDER}
+      api-base-url:   ${CASSYX_BILLING_API_URL:https://api.stripe.com}
+    email:
+      # 'log' writes the whole email (including the key) to the log instead of sending it, so the
+      # service runs end to end with no provider account. Not for production.
+      provider: ${CASSYX_LICENSING_EMAIL_PROVIDER:log}
+      from:     ${CASSYX_LICENSING_EMAIL_FROM:licensing@cassyx.dev}
+      reply-to: ${CASSYX_LICENSING_EMAIL_REPLY_TO:support@cassyx.dev}
+      subject:  ${CASSYX_LICENSING_EMAIL_SUBJECT:Your cassyx licence key}
