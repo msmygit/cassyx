@@ -217,6 +217,14 @@ deps-audit: ## npm audit (fast, every commit; no NVD dependency)
 	   $(NPM) "npm ci --no-audit --no-fund || npm install --no-audit --no-fund; npm audit --audit-level=high" || exit 1; \
 	 else printf "\033[33m! frontend/ absent — npm audit skipped\033[0m\n"; fi
 
+# dependency-check:check is invoked as a STANDALONE goal, so Maven runs no lifecycle phase and
+# never installs the reactor's own modules. cassyx-bulk depends on io.cassyx:cassyx-core:0.1.0-
+# SNAPSHOT, which therefore is not in the local repository and cannot be resolved:
+#   Could not find artifact io.cassyx:cassyx-core:jar:0.1.0-SNAPSHOT
+# This was latent from the start and only surfaced once the jackson finding was cleared - until
+# then the reactor always died on cassyx-core's CVE and never reached cassyx-bulk. Hence the
+# install pass below. Tests, spotless and checkstyle are skipped: ci.yml already runs all three,
+# and this target's job is CVE resolution, not re-verifying the build.
 cve-scan: ## OWASP Dependency-Check (weekly + on dependency changes; NOT per commit)
 	@if [ -f "$(ROOT)/backend/pom.xml" ]; then \
 	   printf "$(CYAN)▸$(OFF) OWASP Dependency-Check (CVE-2026-24400 / CVE-2023-6378 pins, §2)\n"; \
@@ -231,6 +239,9 @@ cve-scan: ## OWASP Dependency-Check (weekly + on dependency changes; NOT per com
 	       printf "\033[31mSECURITY_STRICT is set — refusing to skip. Provide NVD_API_KEY.\033[0m\n"; exit 1; \
 	     fi; \
 	   else \
+	     printf "  installing reactor modules first (see note below)\n"; \
+	     $(DC_TOOLS) run --rm --no-deps maven -B -ntp -DskipTests \
+	       -Dspotless.check.skip=true -Dcheckstyle.skip=true install || exit 1; \
 	     $(DC_TOOLS) run --rm --no-deps -e NVD_API_KEY maven -B -ntp \
 	       org.owasp:dependency-check-maven:check -DfailBuildOnCVSS=7 \
 	       -DnvdApiKey=$$NVD_API_KEY || exit 1; \
