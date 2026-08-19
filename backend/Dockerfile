@@ -35,7 +35,14 @@ COPY cassyx-api/src      cassyx-api/src
 # Tests are deliberately skipped in the image build. `make unit`, `make integration` and CI run
 # them in a dedicated Maven container where a failure is reported as a test failure rather than as
 # an opaque image-build error. Skipping here is what keeps `make up` fast.
-RUN mvn -B -q package -DskipTests -Dcassyx.coverage.skip=true \
+#
+# CASSYX_BYPASS_PROFILE selects the licence bypass gate baked into application.yml (plan section
+# 9.2): `release` bakes cassyx.license.bypass-allowed=false, so CASSYX_LICENSE_ENFORCE=false is
+# ignored in the published image and unlocking requires a signed site licence. Local `make up`
+# overrides it to `dev` so the documented developer bypass keeps working; the published image must
+# never be built without this arg at its default.
+ARG CASSYX_BYPASS_PROFILE=release
+RUN mvn -B -q package -P"${CASSYX_BYPASS_PROFILE}" -DskipTests -Dcassyx.coverage.skip=true \
  && cp cassyx-api/target/cassyx-api-*.jar /build/cassyx-api.jar
 
 # ---------------------------------------------------------------------------

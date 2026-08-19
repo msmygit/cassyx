@@ -138,6 +138,26 @@ along the way that is a backend/contract concern, not something to patch around 
   collect it (Checkout can collect email itself when omitted), or (b) confirm the frontend must
   collect an email before calling checkout in those states and I'll wire a prompt. Not fixed here —
   `openapi/**` is out of scope for this workstream.
+## Site licence, needs frontend
+
+Backend side is done (plan §9.2): `GET /api/license` can now return `edition: "site"`, and a
+refused bypass reports `enforce: true` / `bypass: false` rather than claiming to be bypassed.
+The UI still needs:
+
+- **A `site` badge.** `edition: "site"` is a GRANTED licence, not a bypass: it must NOT render the
+  yellow `unlicensed-bypass` warning banner. Suggested copy: "Site licence, unlimited seats".
+  Everything else about the screen is the same as a paid `standard` licence.
+- **Time-boxed site licences exist.** `expires` / `daysRemaining` can be non-null on a `site`
+  licence (an evaluation site licence), so the countdown must not be gated on `trial === true`.
+  When it lapses, `state` is `EXPIRED` with `edition: "site"` and `trial: false`, the copy should
+  say the site licence expired, not that a trial did.
+- **Do not infer "unlocked" from the `enforce` flag alone.** The API now reports the EFFECTIVE
+  value: a release build that was given `CASSYX_LICENSE_ENFORCE=false` reports `enforce: true`,
+  `bypass: false`. Render on `licensed` + `state`, and use `bypass` only to decide the bypass
+  banner.
+- **Locked-screen copy for release builds.** When `licensed: false`, the purchase screen should
+  mention that a free site licence is available for CI, evaluation and enterprise use, since
+  telling those users to flip an env var no longer helps them in a published image.
 
 ## Process-tree cancellation — CLOSED
 
@@ -176,3 +196,34 @@ Two properties were verified rather than assumed:
 Guarded by `ProcessDsbulkRunnerTest.cancelKillsEveryDescendant`, which asserts no descendant
 survives — not merely that the parent died. Negative control: with the group signal stubbed out the
 test fails at 20.5s with `run() returned, so nothing is still holding the stderr pipe`.
+
+## Licence gate - needs contract
+
+`LicenseGateFilter` (plan 9.1) now refuses every gated `/api/**` request with `402 Payment
+Required` and an RFC 9457 `application/problem+json` body. `openapi/cassyx-api.yaml` is off-limits
+to this workstream, so the contract does not yet describe any of it. Needed:
+
+1. **A `402` response on every gated operation.** Every operation outside `/api/health`,
+   `/api/license/**` and `/api/billing/**` can now return `402`, and none of them declare it. Plan
+   2.3 forbids bare 4XX, so this is a per-operation `$ref` to the shared problem schema - most
+   cheaply expressed as a `components/responses/LicenseRequired` reused everywhere.
+
+2. **A problem variant carrying `state`.** The body extends the shared RFC 9457 shape with three
+   extension members, and the generated client currently types none of them:
+
+   | member | type | meaning |
+   | --- | --- | --- |
+   | `state` | enum: `VALID` `BYPASS` `EXPIRED` `ABSENT` `MALFORMED` `INVALID_SIGNATURE` `UPGRADE_REQUIRED` | which activation screen to render |
+   | `invitesPurchase` | boolean | true for `EXPIRED`/`ABSENT`/`UPGRADE_REQUIRED` (plan 9.4) |
+   | `unlockHint` | string | operator-facing remedy; differs between a dev and a release build |
+
+   `state` is the same enum the `LicenseStatus` schema already uses for `GET /api/license`, so it
+   should be lifted to a named `LicenseState` schema and referenced from both rather than
+   duplicated - the filter and the status endpoint are required never to disagree, and two copies
+   of the enum is how that starts.
+
+3. **`type` registration.** The problem `type` is `https://cassyx.dev/problems/license-required`,
+   alongside the existing `https://cassyx.dev/problems/*` URIs.
+
+Until this lands, the frontend must treat a `402` from any `/api` call as "licence problem, read
+`state`" without generated types for the body.

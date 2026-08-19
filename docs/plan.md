@@ -47,8 +47,8 @@ simultaneously:
    with DSBulk's full settings surface exposed but sane auto-derived defaults.
 3. **Vector-native** — SAI, `vector<float, N>` columns, and ANN queries are first-class citizens,
    not an afterthought.
-4. **Commercially sellable** — one-time Stripe payment unlocking the whole product, with a
-   documented bypass flag for self-hosting/dev/enterprise.
+4. **Commercially sellable**, one-time Stripe payment unlocking the whole product, with free
+   signed **site licences** for CI, evaluation and enterprise self-hosting (§9.2).
 
 ### Decisions already made (locked)
 
@@ -58,8 +58,9 @@ simultaneously:
   Chosen over `scylla-rust-driver` specifically because it natively supports Astra's
   **secure connect bundle** via `CqlSessionBuilder.withCloudSecureConnectBundle(...)`, which the
   Rust driver does not. It is also the driver DSBulk is built on, so one driver serves both paths.
-- **Licensing:** everything is one paid tier (no free/pro split). One-time payment. A bypass flag
-  disables all license enforcement.
+- **Licensing:** everything is one paid tier (no free/pro split). One-time payment. A free signed
+  `site` licence unlocks CI, evaluation and enterprise deployments; the `enforce=false` bypass flag
+  survives only in development builds (§9.2).
 - **Scope:** everything lands in v1, including vector/SAI/ANN.
 - **Build method:** parallel subagent workstreams (§10).
 
@@ -619,7 +620,8 @@ Keyspaces in particular needs the bulk path to fall back from token-range scan t
 
 ## 9. Monetization: one-time Stripe payment
 
-Per the decision: **one paid tier, everything included, one-time payment, plus a bypass flag.**
+Per the decision: **one paid tier, everything included, one-time payment, plus free signed site
+licences and a development-only bypass flag.**
 
 ### 9.0 Distribution licence
 
@@ -658,23 +660,79 @@ license payload (base64url, dot-separated from signature):
 
 - `LicenseService.verify()` — signature check against `CASSYX_LICENSE_PUBLIC_KEY` (compile-time
   constant, overridable for dev). No network call on the hot path.
-- Spring Security filter + `@RequiresLicense` annotation gate all `/api/**` except
-  `/api/health`, `/api/license/**`, and `/api/billing/**`.
+- **Server-side gate: `LicenseGateFilter`**, a plain `OncePerRequestFilter` registered as a
+  `FilterRegistrationBean` on `/api/*`. It refuses every `/api/**` request except `/api/health`,
+  `/api/license/**` and `/api/billing/**` with **`402 Payment Required`** and an RFC 9457
+  `application/problem+json` body carrying the `state` (`ABSENT`, `EXPIRED`, `INVALID_SIGNATURE`,
+  `UPGRADE_REQUIRED`, `MALFORMED`), `invitesPurchase` and a build-appropriate `unlockHint`, so the
+  frontend routes to the correct screen instead of a generic error. Non-`/api` paths (the SPA and
+  its assets) are untouched: gating them would take down the very activation screen the 402 points
+  at. Prefix matching is exact-or-subtree, so `/api/licenseholders` stays gated.
+- **Not Spring Security, deliberately.** Its value is authentication and authorisation machinery,
+  and section 12 records that cassyx assumes a single-user self-hosted instance - there are no
+  principals, roles or sessions. What it would add is a filter chain, a servlet-wide security
+  config, and CSRF protection that the Stripe webhook under `/api/billing/**` would then need an
+  explicit exemption from: a new way to break payments in exchange for nothing. If real user
+  accounts ever arrive, Spring Security can replace the filter and reuse the same `LicenseGate`.
+- **One decision, two consumers.** `LicenseGate` (a single bean) holds the verifier, the
+  `BypassPolicy` and the running version; the filter and `GET /api/license` both read it, so they
+  cannot disagree. A gate that says "locked" while the status endpoint says "unlocked" is a support
+  ticket; the reverse is the product given away. `LicenseGateConsistencyTest` asserts the agreement
+  across the whole (public key × key × enforce × bypass-allowed × version) matrix.
+- **Fails closed.** Any exception from verification becomes an invalid verdict, never an allow. An
+  unusable `cassyx.license.public-key` still leaves `/api/license` reachable reporting `MALFORMED`,
+  because a configuration gap must be diagnosable rather than silent.
+- **Hot path.** The verdict is cached for 30s and invalidated on activation - long enough to
+  collapse a burst of API calls onto one Ed25519 verify, short enough that a lapsing trial does not
+  survive until the next restart.
+- **Version scoping is live.** The running major comes from `CassyxVersion`, sourced from
+  spring-boot-maven-plugin's `build-info` goal and degrading to `1.0.0` (never `0.x`, whose
+  `coversMajor()` is true for every scope and would make scoping fail silently open).
 - Frontend: a `LicenseGate` provider; unlicensed state renders an activation/purchase screen.
 
-### 9.2 The bypass flag
+### 9.2 Site licences, and the build-gated bypass flag
+
+A documented `CASSYX_LICENSE_ENFORCE=false` unlocks the entire paid product with one env var, and
+nothing in the code can tell the maintainer's CI from a customer who read the README. The flag's
+users are legitimate (development, CI, evaluation, enterprise site deployments), so they get a
+**signed credential** instead, and the free switch stops shipping in release builds.
+
+**The `site` edition.** `edition: "site"` is an ordinary Ed25519-signed key verified by exactly the
+same code path, there is no special case in the verifier, and forging one needs the private key.
+Semantics: unlimited seats (`seats: 0`), normally perpetual and unscoped, but `expires` and `scope`
+still apply when present, because a time-boxed evaluation site licence is a real thing we issue.
+It is *granted*, so it is not the `unlicensed-bypass` sentinel: the UI names the edition rather
+than warning about it. Site licences are issued free on request for CI, evaluation and enterprise
+use.
 
 ```yaml
 cassyx:
   license:
-    enforce: ${CASSYX_LICENSE_ENFORCE:true}   # false ⇒ fully unlocked, no checks
-    key:     ${CASSYX_LICENSE_KEY:}
+    enforce:        ${CASSYX_LICENSE_ENFORCE:true}   # false ⇒ fully unlocked, no checks
+    bypass-allowed: @cassyx.license.bypass.allowed@  # BUILD-time gate, filtered by Maven
+    key:            ${CASSYX_LICENSE_KEY:}
 ```
 
-When `enforce=false`, `LicenseService` short-circuits to a synthetic valid license and the API
-returns `edition: "unlicensed-bypass"`. **The banner stays visible in the UI** so a bypassed
-instance is never mistaken for a paid one. Log a WARN at startup. This is the switch for
-development, CI, evaluation, and enterprise site-license deployments.
+`bypass-allowed` is baked in at package time by a Maven profile in `backend/cassyx-api/pom.xml` -
+`dev` (active by default) filters it to `true`, `release` to `false`, and `backend/Dockerfile`
+builds `release` by default so every published image carries it. It is deliberately **not** an env
+var: a runtime switch guarding a runtime switch guards nothing.
+
+| `enforce` | `bypass-allowed` | Result |
+| --- | --- | --- |
+| `true` | either | Normal verification. A `site` key unlocks it, no flag involved. |
+| `false` | `true` (dev build) | Bypass granted: synthetic licence, `edition: "unlicensed-bypass"`, `state: BYPASS`, `enforce: false`, banner visible. |
+| `false` | `false` (release build) | Bypass **refused**: the flag is ignored, enforcement stays on, and a WARN naming `CASSYX_LICENSE_ENFORCE` is logged at startup so the operator is never left guessing. |
+
+`GET /api/license` reports the **effective** state, never the raw flag: a refused bypass reports
+`enforce: true`, `bypass: false` and the real `edition`/`state`, so `(enforce, bypass, edition,
+state)` can never contradict itself. Claiming `enforce: false` while verifying licences would make
+every client render an unlocked UI over a locked instance.
+
+Honest limitation: this raises the cost of a casual bypass from "read the README" to "patch and
+rebuild the jar". Self-hosted software the customer runs and can recompile is not tamper-proof and
+this design does not pretend otherwise; it removes the *supported, documented* free unlock and
+replaces it with a credential we can issue, scope and time-box.
 
 ### 9.3 Stripe integration (all placeholders, no live keys in repo)
 

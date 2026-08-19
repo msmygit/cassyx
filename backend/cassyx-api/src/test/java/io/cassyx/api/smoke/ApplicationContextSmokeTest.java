@@ -111,6 +111,10 @@ class ApplicationContextSmokeTest {
   @Test
   void licenseAndBillingPlaceholdersAreBound() {
     assertThat(licenseProperties.enforce()).isFalse();
+    // Filtered into application.yml by the Maven profile (plan section 9.2). Tests run under the
+    // default `dev` profile, so it binds to true - and binding at all proves the @...@ token was
+    // substituted rather than shipped literally, which would fail the context outright.
+    assertThat(licenseProperties.bypassAllowed()).isTrue();
     assertThat(billingProperties.enabled()).isFalse();
     assertThat(billingProperties.provider()).isEqualTo("stripe");
     assertThat(billingProperties.apiBaseUrl()).isEqualTo("https://api.stripe.com");
