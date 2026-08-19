@@ -232,6 +232,13 @@ deps-audit: ## npm audit (fast, every commit; no NVD dependency)
 #    is very nearly the same dependency graph - which took the CI job past its 60 minute timeout
 #    without ever reaching a verdict. `aggregate` analyses the whole reactor in one pass and
 #    reports the same findings.
+#
+# 3. NVD retry settings. The NVD API returns 503 under load often enough that an unretried run
+#    is a coin flip, and the failure is indistinguishable at a glance from a real finding:
+#      UpdateException: Error updating the NVD Data
+#        caused by NvdApiException: NVD Returned Status Code: 503
+#    nvdApiDelay spaces the requests out to avoid provoking it in the first place. This costs a
+#    few minutes on a cold sync and nothing at all on a cached one.
 cve-scan: ## OWASP Dependency-Check (weekly + on dependency changes; NOT per commit)
 	@if [ -f "$(ROOT)/backend/pom.xml" ]; then \
 	   printf "$(CYAN)▸$(OFF) OWASP Dependency-Check (CVE-2026-24400 / CVE-2023-6378 pins, §2)\n"; \
@@ -251,7 +258,7 @@ cve-scan: ## OWASP Dependency-Check (weekly + on dependency changes; NOT per com
 	       -Dspotless.check.skip=true -Dcheckstyle.skip=true install || exit 1; \
 	     $(DC_TOOLS) run --rm --no-deps -e NVD_API_KEY maven -B -ntp \
 	       org.owasp:dependency-check-maven:aggregate -DfailBuildOnCVSS=7 \
-	       -DnvdApiKey=$$NVD_API_KEY || exit 1; \
+	       -DnvdApiKey=$$NVD_API_KEY -DnvdMaxRetryCount=20 -DnvdApiDelay=2000 || exit 1; \
 	   fi; \
 	 else printf "\033[33m! backend/ absent — OWASP Dependency-Check skipped\033[0m\n"; fi
 
