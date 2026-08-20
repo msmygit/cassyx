@@ -138,6 +138,39 @@ along the way that is a backend/contract concern, not something to patch around 
   collect it (Checkout can collect email itself when omitted), or (b) confirm the frontend must
   collect an email before calling checkout in those states and I'll wire a prompt. Not fixed here —
   `openapi/**` is out of scope for this workstream.
+## Frontend 402 handling - needs backend
+
+The frontend now reacts to `LicenseGateFilter`'s 402 (plan §9.1): the API client turns it into a
+typed error, publishes it on a process-wide signal, and `LicenseGate` re-reads `GET /api/license`
+and renders the activation screen for whatever state the status endpoint reports. Nothing here is
+blocked, but three things are worth the backend/contract workstream's attention:
+
+1. **The 402 body type is HAND-WRITTEN** (`LicenseGateState` / `LicenseRequiredDetails` in
+   `frontend/src/api/errors.ts`), because the contract still does not describe the response or its
+   `state` / `invitesPurchase` / `unlockHint` extension members - see "Licence gate - needs
+   contract" above, which this depends on and does not duplicate. When that lands, the hand-written
+   enum should become an alias of the generated `LicenseState`, and the frontend parser can drop
+   its "unknown state" degradation to a pure type narrowing. The parser tolerates a 402 with no
+   body, a non-problem+json body and an unrecognised `state` today, so a proxy-generated 402 still
+   reaches the activation screen.
+
+2. **The frontend deliberately renders from `GET /api/license`, not from the 402's `state`.** It
+   treats the 402 purely as a trigger to re-check, on the strength of the §9.1 guarantee that the
+   filter and the status endpoint read one `LicenseGate` bean and cannot disagree. If that
+   guarantee is ever relaxed, tell this workstream: the fallback would be to render the activation
+   screen straight off the 402 body, which is strictly worse (the 402 carries no `name`/`email`, so
+   an expired customer would lose the checkout pre-fill).
+
+3. **SSE cannot see the 402.** `EventSource` exposes neither the status code nor the body of a
+   failed response, so `GET /api/jobs/{id}/events` behind the gate looks exactly like a dropped
+   connection. The client now closes the stream (rather than reconnecting against the wall forever)
+   and issues ONE `fetch` probe of the same URL to find out whether it was a 402. A cheaper answer
+   would be for the gate to be irrelevant here - i.e. for the stream to be opened only once the
+   instance is licensed - but the probe is a request per dead stream and worth knowing about if
+   anyone reads the access log and wonders. If a future auth scheme forces job streams onto
+   `fetch` + `ReadableStream` (`readSseStream` already exists for that), the probe can be deleted:
+   the status would then be readable directly.
+
 ## Site licence, needs frontend
 
 Backend side is done (plan §9.2): `GET /api/license` can now return `edition: "site"`, and a

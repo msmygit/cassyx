@@ -9,7 +9,8 @@
  * stream has to run over `fetch` + `ReadableStream` instead — and both paths then share one parser.
  */
 import { apiClient } from './client';
-import { AppError, toAppError } from './errors';
+import { AppError, problemFromResponse, toAppError } from './errors';
+import { publishLicenseRequired } from './licenseSignal';
 import type { JobStatus, Schemas } from './types';
 
 export type { JobStatus };
@@ -124,12 +125,60 @@ export interface JobEventHandlers {
   onJobError?: (event: JobErrorEvent) => void;
   /** Transport-level failure, as opposed to a job failure. */
   onError?: (error: AppError) => void;
+  /**
+   * The stream died because the licence gate refused it (plan §9.1). Arrives *after* `onError`,
+   * because the reason can only be established with a second request (see `probeSseGate`).
+   */
+  onLicenseRequired?: (error: AppError) => void;
   /** Every raw event, including ones we do not model. */
   onMessage?: (message: SseMessage) => void;
 }
 
 /** Injectable so tests can supply a fake EventSource. */
 export type EventSourceFactory = (url: string) => EventSource;
+
+/**
+ * How many `error` events we tolerate before closing the stream ourselves.
+ *
+ * Per the HTML spec a non-200 response fails the connection permanently, so a 402 *should* leave
+ * `readyState === CLOSED` on the first error. Implementations and intermediaries disagree often
+ * enough that a stream can end up retrying against the licence wall forever, which is a request
+ * per few seconds for as long as the tab is open. This is the backstop.
+ */
+export const MAX_SSE_RECONNECT_ERRORS = 3;
+
+/** Establishes *why* a stream died. Injectable so tests need no network. */
+export type SseGateProbe = (url: string) => Promise<AppError | null>;
+
+/**
+ * Ask the stream URL once, over `fetch`, whether it is refusing us with a 402.
+ *
+ * `EventSource` exposes neither the status code nor the body of a failed response, so a licence
+ * refusal is indistinguishable from a dropped connection at that layer. One bounded probe turns
+ * "the job stream keeps dying" into the activation screen. Any non-402 answer (including the
+ * stream actually opening again) is reported as "not a licence problem" and the response is
+ * abandoned immediately rather than left streaming.
+ */
+export async function probeSseGate(
+  url: string,
+  fetchImpl: typeof fetch = globalThis.fetch,
+): Promise<AppError | null> {
+  const controller = new AbortController();
+  try {
+    const response = await fetchImpl(url, {
+      headers: { Accept: 'text/event-stream' },
+      credentials: 'same-origin',
+      signal: controller.signal,
+    });
+    if (response.status !== 402) return null;
+    return await problemFromResponse(response, 'SSE /api/jobs');
+  } catch {
+    // A failed probe means we simply do not know; the generic transport error already stands.
+    return null;
+  } finally {
+    controller.abort();
+  }
+}
 
 const TERMINAL: ReadonlySet<JobStatus> = new Set<JobStatus>(['SUCCEEDED', 'FAILED', 'CANCELLED']);
 
@@ -157,7 +206,7 @@ export const JOB_EVENT_NAMES = ['status', 'progress', 'log', 'completed', 'error
 export function subscribeToJobEvents(
   jobId: string,
   handlers: JobEventHandlers,
-  options: { factory?: EventSourceFactory; url?: string } = {},
+  options: { factory?: EventSourceFactory; url?: string; probe?: SseGateProbe } = {},
 ): SseSubscription {
   const url = options.url ?? apiClient.url(`/api/jobs/${encodeURIComponent(jobId)}/events`);
   const factory: EventSourceFactory =
@@ -212,15 +261,34 @@ export function subscribeToJobEvents(
     source.addEventListener(name, (event) => handle(name, event as MessageEvent<string>));
   }
 
+  const probe: SseGateProbe = options.probe ?? ((target: string) => probeSseGate(target));
+  let errorCount = 0;
+  let probed = false;
+
+  const askWhy = async () => {
+    if (probed) return; // one probe per subscription: never trade a retry loop for a probe loop
+    probed = true;
+    const gateError = await probe(url);
+    if (!gateError) return;
+    // The app-wide reaction (re-check the licence, render the activation screen) is driven by the
+    // signal; the handler is for the job pane's own messaging.
+    publishLicenseRequired(gateError);
+    handlers.onLicenseRequired?.(gateError);
+  };
+
   source.onerror = () => {
+    errorCount += 1;
     // EventSource reconnects on its own for transient drops; surface it but do not tear down
-    // unless the connection is definitively closed.
-    if (source.readyState === 2 /* CLOSED */) {
-      handlers.onError?.(
-        new AppError('Job progress stream closed', { kind: 'network', request: 'SSE /api/jobs' }),
-      );
-      close();
-    }
+    // unless the connection is definitively closed - or unless it has failed so often that it is
+    // clearly hitting a wall (a 402 from the licence gate looks exactly like this).
+    const finished = source.readyState === 2 /* CLOSED */ || errorCount >= MAX_SSE_RECONNECT_ERRORS;
+    if (!finished) return;
+
+    handlers.onError?.(
+      new AppError('Job progress stream closed', { kind: 'network', request: 'SSE /api/jobs' }),
+    );
+    close();
+    void askWhy().catch(() => {}); // a failing probe is diagnostics, never a new failure mode
   };
 
   return { close };

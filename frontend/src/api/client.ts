@@ -6,6 +6,7 @@
  * This module deliberately stays generation-agnostic: it is a thin, well-tested transport.
  */
 import { AppError, problemFromResponse, toAppError } from './errors';
+import { publishLicenseRequired } from './licenseSignal';
 
 export interface ApiClientOptions {
   /** Base URL. Empty string means same-origin. */
@@ -74,7 +75,10 @@ export class ApiClient {
   constructor(options: ApiClientOptions = {}) {
     this.baseUrl = (options.baseUrl ?? API_BASE_URL).replace(/\/+$/, '');
     this.timeoutMs = options.timeoutMs ?? API_TIMEOUT_MS;
-    this.fetchImpl = options.fetchImpl ?? globalThis.fetch.bind(globalThis);
+    // Late-bound on purpose: capturing `globalThis.fetch` at construction time would pin the
+    // singleton below to whatever existed at module load, before a polyfill (or a test stub) had
+    // a chance to install itself.
+    this.fetchImpl = options.fetchImpl ?? ((input, init) => globalThis.fetch(input, init));
     this.baseHeaders = options.headers ?? {};
   }
 
@@ -121,7 +125,12 @@ export class ApiClient {
     }
 
     if (!response.ok) {
-      throw await problemFromResponse(response, requestLabel);
+      const error = await problemFromResponse(response, requestLabel);
+      // Every gated `/api/**` call can now be refused by `LicenseGateFilter` (plan §9.1). Publish
+      // it here, at the single choke point every request passes through, rather than trusting
+      // each call site to remember.
+      if (error.isLicenseRequired) publishLicenseRequired(error);
+      throw error;
     }
 
     if (response.status === 204) return undefined as T;
