@@ -83,6 +83,45 @@ fi
 say "backend: GET /api/license (first call the UI makes; ungated per §9.1)"
 check_field "/api/license returns state" "$API/api/license" "state"
 
+# Release-only, opt-in: assert the image can verify a licence AT ALL.
+#
+# This exists because 1.0.0 shipped unable to verify anything. The public key defaulted to the
+# literal "PLACEHOLDER" and nothing set CASSYX_LICENSE_PUBLIC_KEY, so every customer saw "This
+# server is not configured for licensing" and no key could ever have unlocked it. Every other
+# check passed: the stack booted, served, reported the right version and refused unlicensed
+# requests. It looked like a perfect release, and it was unsellable.
+#
+# With no CASSYX_LICENSE_KEY set, a correctly built image reports ABSENT ("no key supplied, offer a
+# trial"). MALFORMED here means the SERVER cannot verify - an operator fault, not a buyer one - and
+# is the exact failure that shipped. Distinguishing the two is the whole point of the check.
+if [ -n "${CASSYX_SMOKE_EXPECT_LICENSABLE:-}" ]; then
+  say "release: the image can verify a licence (public key is configured)"
+  lic="$(curl -fsS "$API/api/license" 2>/dev/null || echo '')"
+  lic_state="$(printf '%s' "$lic" | sed -n 's/.*"state"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+  case "$lic_state" in
+    MALFORMED)
+      fail "the image cannot verify any licence - it reports MALFORMED with no key supplied"
+      printf "    This is the 1.0.0 failure: cassyx.license.public-key is unset or not decodable,\n"
+      printf "    so NO licence key you mint can ever unlock this build. Customers see\n"
+      printf "    \"This server is not configured for licensing\".\n"
+      printf "    Fix: set the real Ed25519 public key as the default for cassyx.license.public-key\n"
+      printf "    in backend/cassyx-api/src/main/resources/application.yml (a public key is not a\n"
+      printf "    secret; it is the half designed to ship), then rebuild.\n"
+      ;;
+    ABSENT|VALID|BYPASS)
+      pass "licence verification is configured (state=$lic_state)"
+      ;;
+    "")
+      fail "/api/license returned no parseable state - cannot tell whether verification works"
+      ;;
+    *)
+      # EXPIRED / UPGRADE_REQUIRED / INVALID_SIGNATURE all prove the key verified something, so
+      # verification itself is working even though this particular licence is not usable.
+      pass "licence verification is configured (state=$lic_state)"
+      ;;
+  esac
+fi
+
 say "frontend: SPA is served and proxies /api"
 code="$(curl -s -o /dev/null -w '%{http_code}' "$WEB/" || echo 000)"
 [ "$code" = "200" ] && pass "SPA responds 200" || fail "SPA — expected 200, got $code"

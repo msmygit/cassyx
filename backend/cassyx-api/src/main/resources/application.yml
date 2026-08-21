@@ -69,7 +69,17 @@ cassyx:
     key:     ${CASSYX_LICENSE_KEY:}
     # Only the PUBLIC half of the Ed25519 key pair ever ships (plan section 9.1). Minting happens
     # in the separate licensing/ deployment, which holds the private key.
-    public-key: ${CASSYX_LICENSE_PUBLIC_KEY:PLACEHOLDER}
+    #
+    # The real key is the DEFAULT rather than something the operator supplies, and that is
+    # deliberate. Shipping PLACEHOLDER meant 1.0.0 could verify nothing at all: no CASSYX_LICENSE_
+    # PUBLIC_KEY was set anywhere in docker-compose.release.yml or .env.release.example, so every
+    # customer got "This server is not configured for licensing" and no key could ever unlock it.
+    # A locked box with no keyhole.
+    #
+    # A public key is not a secret - it is the half designed to be published - so baking it in is
+    # safe, and it means verification cannot be broken by a customer editing compose. The override
+    # remains for a private fork that mints its own keys.
+    public-key: ${CASSYX_LICENSE_PUBLIC_KEY:MCowBQYDK2VwAyEA7n26g0ti3VRaiAaavuPPsmV6A1KHwLG7PqRB32zf0hw=}
 
   billing:
     enabled:          ${CASSYX_BILLING_ENABLED:false}

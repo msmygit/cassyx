@@ -111,16 +111,41 @@ mistake that cannot be undone.
 
 ### 2.1 The licensing service (private, you operate it)
 
-`licensing/.env`, never distributed. Generate the keypair:
+`licensing/.env`, never distributed. Generate the keypair - **runnable from anywhere**, no repo
+checkout, no Maven, no build:
 
 ```bash
-docker run --rm -v "$PWD":/w -v "$HOME/.m2":/root/.m2 -w /w/backend \
-  maven:3.9-eclipse-temurin-21 \
-  mvn -q -Plicensing -pl ../licensing exec:java \
-    -Dexec.mainClass=io.cassyx.licensing.mint.KeyPairTool
+mkdir -p /tmp/cassyx-keys && cd /tmp/cassyx-keys
+cat > KeyGen.java <<'EOF'
+import java.security.*;
+import java.util.Base64;
+public class KeyGen {
+  public static void main(String[] a) throws Exception {
+    KeyPair p = KeyPairGenerator.getInstance("Ed25519").generateKeyPair();
+    Base64.Encoder e = Base64.getEncoder();
+    System.out.println("# PUBLIC half - SHIPS with the product. Safe to publish.");
+    System.out.println("CASSYX_LICENSE_PUBLIC_KEY=" + e.encodeToString(p.getPublic().getEncoded()));
+    System.out.println();
+    System.out.println("# PRIVATE half - NEVER ships. licensing/.env only. Back this up.");
+    System.out.println("CASSYX_LICENSING_PRIVATE_KEY=" + e.encodeToString(p.getPrivate().getEncoded()));
+  }
+}
+EOF
+docker run --rm -v "$PWD":/w -w /w eclipse-temurin:21-jdk java KeyGen.java
+rm -rf /tmp/cassyx-keys   # after you have stored both halves
 ```
 
-It prints both halves, labelled. Then:
+Output is X.509 base64 for the public half and PKCS#8 base64 for the private half, identical to
+what `licensing/`'s own `KeyPairTool` produces.
+
+> **Why not `KeyPairTool` via Maven?** `mvn -Plicensing -pl ../licensing exec:java` fails with
+> `Could not find artifact io.cassyx:cassyx-license:jar:1.0.0`, because `-pl` without `-am` never
+> builds the dependency. The tool that generates your single most important secret should not need
+> a working reactor, so use the standalone version above.
+
+The private half will be in your terminal scrollback and shell history. Clear both.
+
+Then:
 
 | Variable | Value | Notes |
 | --- | --- | --- |
@@ -141,8 +166,18 @@ It prints both halves, labelled. Then:
 `.env` next to `docker-compose.release.yml`. See [README → Install a release](../README.md#install-a-release).
 
 The only licensing-relevant value is `CASSYX_LICENSE_PUBLIC_KEY`, which is **baked into the image
-you publish**, not something the customer sets. The customer sets `CASSYX_LICENSE_KEY` (their key)
-and `CASSYX_SECRET_KEY` (encrypts their stored cluster credentials; no default on purpose).
+you publish** as the default for `cassyx.license.public-key` in
+`backend/cassyx-api/src/main/resources/application.yml`, not something the customer sets. The
+customer sets `CASSYX_LICENSE_KEY` (their key) and `CASSYX_SECRET_KEY` (encrypts their stored
+cluster credentials; no default on purpose).
+
+> **This is where 1.0.0 broke.** The default was the literal `PLACEHOLDER` and nothing set the env
+> var, so the published image could verify *nothing*: every customer got "This server is not
+> configured for licensing" and no key could have unlocked it. Every other release check passed.
+> `CASSYX_SMOKE_EXPECT_LICENSABLE` now fails the release if an image cannot verify a licence.
+>
+> Baking the key in rather than asking the customer for it is deliberate: a public key is not a
+> secret, and verification should not be breakable by editing a compose file.
 
 > **The private key must never appear in the product image, in this repo, or in any customer-facing
 > config.** The product only ever *verifies*. That is the entire reason `licensing/` is a separate

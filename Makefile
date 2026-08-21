@@ -415,6 +415,7 @@ release-local: ## Dry-run the release: build both images, run docker-compose.rel
 	@# swallowed.
 	$(call say,smoke - the same gate CI and 'make smoke' run)
 	@CASSYX_SMOKE_EXPECT_VERSION="$$(bash $(ROOT)/scripts/release-version.sh)" \
+	 CASSYX_SMOKE_EXPECT_LICENSABLE=1 \
 	 bash $(ROOT)/scripts/smoke.sh
 	@printf "\n\033[32m✓ release-local passed.\033[0m Stack is still up on $(APP_URL) - 'make release-down' to clean up.\n\n"
 
