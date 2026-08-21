@@ -302,7 +302,7 @@ jobs:
       # guarantee, and it should not rest on a reader knowing that rule.
       - name: Log in to GHCR
         if: success() && env.PUSH == 'true'
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
