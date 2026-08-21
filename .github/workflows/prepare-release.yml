@@ -1,0 +1,311 @@
+# =============================================================================
+# cassyx prepare-release - the version bump, done from the Actions UI.
+#
+# Cutting a release used to start with editing <version> in EIGHT pom files by
+# hand. That is not tedium, it is a correctness hazard: the eight are not
+# symmetric (one <project><version>, six <parent><version> inside the reactor,
+# and licensing/pom.xml which sits OUTSIDE it), and the asymmetric one is the
+# one that gets forgotten. It already happened: after the 1.0.0 bump
+# licensing/pom.xml still said 0.1.0-SNAPSHOT, and the module kept building only
+# because a stale cassyx-parent happened to be sitting in the local Maven
+# repository. On a clean machine it would not have resolved at all.
+#
+# So this workflow does the bump mechanically, then REFUSES to open a PR unless
+# all eight files actually agree.
+#
+# What it deliberately does NOT do: push to main. The bump lands through a PR
+# like every other change, so the full CI suite runs on it. tag-release.yml then
+# asserts backend/pom.xml already equals the version being tagged, which is what
+# keeps the bump on the PR path rather than sneaking in beside a tag.
+#
+# Run it, review the PR, merge it, then run tag-release.
+# =============================================================================
+name: prepare-release
+
+# workflow_dispatch ONLY. This writes to the repository; nothing about a push
+# should ever start it.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "New version, bare semver, NO leading v (e.g. 1.0.1)"
+        required: true
+        type: string
+
+concurrency:
+  group: prepare-release
+  cancel-in-progress: false
+
+# Least privilege at the top: individual jobs opt in to what they need.
+permissions: {}
+
+env:
+  # The same image docker-compose.yml pins for the `tools` maven service. Every
+  # build in this repo runs in a container (§2.2) - no host toolchain, here
+  # either, so what runs on the runner is what runs on a laptop.
+  MAVEN_IMAGE: maven:3.9-eclipse-temurin-21
+  # Pinned, not floating. `mvn versions:set` with no version resolves whatever
+  # the plugin's latest release happens to be that day, which is an unpinned
+  # dependency editing our poms.
+  VERSIONS_PLUGIN: org.codehaus.mojo:versions-maven-plugin:2.18.0
+
+jobs:
+  prepare:
+    name: bump · verify eight poms · open PR
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write # push the release/prepare-<version> branch
+      pull-requests: write # open the PR
+    steps:
+      # RELEASE_TOKEN (a PAT with `contents: write`) is preferred over
+      # GITHUB_TOKEN for the same reason it matters in tag-release.yml: events
+      # created with GITHUB_TOKEN do not start other workflows. A PR opened with
+      # GITHUB_TOKEN gets no ci run, so the bump would sit there with no checks
+      # at all and nothing to merge on. See docs/sell-next-steps.md §4.1.
+      - uses: actions/checkout@v7
+        with:
+          token: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+
+      # -----------------------------------------------------------------------
+      # The pom takes a BARE version and the tag takes the `v`. Accepting `v1.0.1`
+      # here would write <version>v1.0.1</version>, which Maven treats as a
+      # perfectly valid (and completely wrong) version string, and the first sign
+      # of trouble would be a tag/pom mismatch three steps later.
+      # -----------------------------------------------------------------------
+      - name: Validate the version
+        id: v
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ "$VERSION" =~ ^v ]]; then
+            echo "::error::'$VERSION' has a leading v. Pass the BARE version (${VERSION#v}) - the git tag gets the v, the pom does not."
+            exit 1
+          fi
+          # Prerelease part is dot-separated identifiers, each non-empty: `1.0.1-`
+          # and `1.0.1-rc.` are rejected, `2.0.0-rc1` and `1.1.0-alpha.1` are not.
+          # release.yml already treats a hyphen after the patch as the prerelease
+          # marker, so this must accept exactly what that logic expects.
+          if [[ ! "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+            echo "::error::'$VERSION' is not bare semver. Expected MAJOR.MINOR.PATCH with optional -prerelease, e.g. 1.0.1 or 1.1.0-rc1."
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "branch=release/prepare-$VERSION" >> "$GITHUB_OUTPUT"
+          echo "will bump to $VERSION"
+
+      # -----------------------------------------------------------------------
+      # -Plicensing is the whole point of this invocation. licensing/ is declared
+      # as a module only inside that profile (see backend/pom.xml), so naming it
+      # explicitly is what makes "bump the version" mean all eight files rather
+      # than the seven that happen to be in the default reactor. The check below
+      # does not trust this to have worked.
+      #
+      # No Maven cache is mounted, on purpose. A fresh local repository is
+      # exactly what proves cassyx-licensing resolves the NEW cassyx-parent out
+      # of the reactor - the 1.0.0 bug hid behind a warm ~/.m2 and would hide
+      # behind a restored cache here too.
+      # -----------------------------------------------------------------------
+      - name: Set the version across the reactor and licensing/
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          set -euo pipefail
+          docker run --rm -u "$(id -u):$(id -g)" \
+            -e MAVEN_CONFIG=/tmp/.m2 \
+            -v "$PWD:/repo" -w /repo/backend \
+            "$MAVEN_IMAGE" \
+            mvn -B -ntp -Dmaven.repo.local=/tmp/.m2/repository \
+              -Plicensing \
+              "$VERSIONS_PLUGIN:set" \
+              -DnewVersion="$VERSION" \
+              -DprocessAllModules=true \
+              -DgenerateBackupPoms=false
+
+      # -----------------------------------------------------------------------
+      # The gate this workflow exists for. Every pom is parsed (not grepped -
+      # backend/pom.xml has ~40 <version> elements and only structure tells them
+      # apart, same reasoning as scripts/release-version.sh) and both its own
+      # <version> and its <parent><version> must equal the target.
+      # -----------------------------------------------------------------------
+      - name: Verify all eight poms agree
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3 - "$VERSION" <<'PY'
+          import glob
+          import sys
+          import xml.etree.ElementTree as ET
+
+          TARGET = sys.argv[1]
+          NS = {"m": "http://maven.apache.org/POM/4.0.0"}
+
+          # Globbed rather than a hardcoded list of eight paths: a module added
+          # later must be covered automatically. A list maintained by hand is
+          # precisely how licensing/ was missed the first time. licensing/pom.xml
+          # is then asserted present by name, because it is the one file no
+          # reactor operation reaches on its own and a silent zero-match glob
+          # would restore the original bug.
+          poms = sorted(
+              glob.glob("backend/pom.xml")
+              + glob.glob("backend/*/pom.xml")
+              + glob.glob("licensing/pom.xml")
+          )
+          if "licensing/pom.xml" not in poms:
+              sys.exit("licensing/pom.xml not found - it sits outside the reactor and must still be bumped")
+
+          bad = []
+          for path in poms:
+              root = ET.parse(path).getroot()
+              own = root.find("m:version", NS)
+              parent = root.find("m:parent/m:version", NS)
+              if own is None and parent is None:
+                  bad.append((path, "<none>", "neither <version> nor <parent><version>"))
+                  continue
+              for label, node in (("project", own), ("parent", parent)):
+                  if node is None:
+                      continue
+                  found = (node.text or "").strip()
+                  print(f"  {found:<24} {label:<8} {path}")
+                  if found != TARGET:
+                      bad.append((path, found, f"<{label}><version>"))
+
+          print(f"\n  {len(poms)} pom files checked")
+          if bad:
+              print(f"\nRELEASE PREP BLOCKED - these do not say {TARGET}:", file=sys.stderr)
+              for path, found, where in bad:
+                  print(f"  {path}: {where} is {found}", file=sys.stderr)
+              print(
+                  "\nA module left on the old version can still build on a machine whose\n"
+                  "local repository holds a stale parent, and fails everywhere else.",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+          print(f"all {len(poms)} pom files agree on {TARGET}")
+          PY
+
+      # The guard the release pipeline itself uses, run here so a disagreement
+      # surfaces now rather than in release.yml's `guard` job after a tag is
+      # already public.
+      - name: Confirm scripts/release-version.sh reports the new version
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          set -euo pipefail
+          reported="$(bash scripts/release-version.sh)"
+          if [ "$reported" != "$VERSION" ]; then
+            echo "::error::scripts/release-version.sh reports '$reported', expected '$VERSION'."
+            exit 1
+          fi
+          # Also exercise the tag-assertion path, which is how release.yml calls it.
+          bash scripts/release-version.sh "v$VERSION" >/dev/null
+
+      # -----------------------------------------------------------------------
+      # -DskipTests on purpose. The question here is only "do the bumped poms
+      # still resolve and compile", including cassyx-licensing against the new
+      # parent. The full suite runs on the PR this workflow opens (ci.yml), and
+      # running it twice buys nothing. spotless/checkstyle are skipped for the
+      # same reason - `make lint` is a required check on the PR.
+      # -----------------------------------------------------------------------
+      - name: Prove it still builds
+        run: |
+          set -euo pipefail
+          docker run --rm -u "$(id -u):$(id -g)" \
+            -e MAVEN_CONFIG=/tmp/.m2 \
+            -v "$PWD:/repo" -w /repo/backend \
+            "$MAVEN_IMAGE" \
+            mvn -B -ntp -Dmaven.repo.local=/tmp/.m2/repository \
+              -Plicensing \
+              -DskipTests -Dspotless.check.skip=true -Dcheckstyle.skip=true \
+              package
+
+      # -----------------------------------------------------------------------
+      # target/ directories are created by the build above and are gitignored,
+      # but `git add -A` would still be the wrong instrument here - only poms may
+      # move in a version bump, so only poms are staged. Anything else appearing
+      # in the diff means something went wrong and should not ride along.
+      # -----------------------------------------------------------------------
+      - name: Commit the bump and push the branch
+        id: push
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+          BRANCH: ${{ steps.v.outputs.branch }}
+        run: |
+          set -euo pipefail
+          git config user.name  "cassyx-release"
+          git config user.email "release@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add -- backend/pom.xml backend/*/pom.xml licensing/pom.xml
+          if git diff --cached --quiet; then
+            echo "::error::nothing changed - backend/pom.xml is already at $VERSION. Skip prepare-release and run tag-release."
+            exit 1
+          fi
+          git commit -m "release: set version to $VERSION"
+          # --force on a dedicated, bot-owned branch name: re-running this
+          # workflow for the same version must replace the previous attempt
+          # rather than fail on a non-fast-forward. It can never touch a branch
+          # a human works on, because the name is derived from the version.
+          git push --force origin "$BRANCH"
+
+      - name: Open the pull request
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.v.outputs.version }}
+          BRANCH: ${{ steps.v.outputs.branch }}
+        run: |
+          set -euo pipefail
+          # A re-run pushes to the same branch, so an open PR already exists and
+          # `gh pr create` would fail. Reusing it is the correct outcome.
+          url="$(gh pr list --head "$BRANCH" --state open --json url --jq '.[0].url // empty')"
+          if [ -n "$url" ]; then
+            echo "reusing the open PR for $BRANCH"
+          else
+            url="$(gh pr create \
+              --base main \
+              --head "$BRANCH" \
+              --title "release: set version to $VERSION" \
+              --body "Version bump for \`v$VERSION\`, prepared by the \`prepare-release\` workflow.
+
+          All eight pom files were verified to agree on \`$VERSION\`:
+          \`backend/pom.xml\`, the six \`backend/cassyx-*/pom.xml\` parent blocks, and
+          \`licensing/pom.xml\` (outside the reactor, behind the \`licensing\` profile).
+
+          \`mvn -Plicensing -DskipTests package\` passed against a clean local repository,
+          so \`cassyx-licensing\` resolves the new parent rather than a stale installed one.
+
+          Next: merge this, then run **tag-release** with version \`$VERSION\`.")"
+          fi
+          # tail -n1: gh occasionally prefixes chatter, and a multi-line value
+          # would corrupt $GITHUB_OUTPUT rather than just look untidy.
+          echo "url=$(printf '%s' "$url" | tail -n1)" >> "$GITHUB_OUTPUT"
+
+      - name: Summary
+        if: always()
+        env:
+          VERSION: ${{ inputs.version }}
+          PR_URL: ${{ steps.pr.outputs.url }}
+          HAS_PAT: ${{ secrets.RELEASE_TOKEN != '' }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### prepare-release \`${VERSION}\`"
+            echo ""
+            if [ -n "${PR_URL:-}" ]; then
+              echo "PR: ${PR_URL}"
+              echo ""
+              if [ "$HAS_PAT" != "true" ]; then
+                echo "> **No \`RELEASE_TOKEN\` secret is configured.** This PR was opened with"
+                echo "> \`GITHUB_TOKEN\`, and GitHub does not start workflows from events created"
+                echo "> with it - so **\`ci\` will not run on this PR**. Close and reopen the PR"
+                echo "> in the UI (or push any commit to the branch from your machine) to make"
+                echo "> the checks appear. See docs/sell-next-steps.md §4.1."
+                echo ""
+              fi
+              echo "Merge it, then run **tag-release** with version \`${VERSION}\`."
+            else
+              echo "No PR was opened - see the failed step above."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

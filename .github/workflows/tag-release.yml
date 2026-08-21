@@ -1,0 +1,315 @@
+# =============================================================================
+# cassyx tag-release - cut the tag that starts a release, from the Actions UI.
+#
+# The order below is the entire value of this workflow:
+#
+#   1. main only
+#   2. backend/pom.xml already says <version>          (prepare-release merged)
+#   3. the tag does not exist yet, here or on the remote
+#   4. BUILD, BOOT AND SMOKE THE IMAGES
+#   5. only now, tag and push
+#   6. tear the stack down
+#
+# Step 4 comes before step 5 because a pushed tag is public the instant it lands.
+# If verification failed afterwards there would be a tag in the repository
+# pointing at a release that does not exist, and the only remedies are deleting
+# a public ref or burning the version number. 1.0.0 had to be pulled from GHCR
+# for a related reason. Everything expensive happens while backing out is still
+# free.
+#
+# This does NOT publish anything. Pushing the tag starts release.yml, which
+# builds multi-arch, pushes to GHCR and creates the GitHub Release.
+#
+# Prerequisite: run prepare-release, review its PR, merge it. This workflow
+# refuses to bump anything itself - the pom change belongs on the PR path.
+# =============================================================================
+name: tag-release
+
+# workflow_dispatch ONLY, and never on push. A workflow that creates public tags
+# must not be reachable by committing.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to tag, bare semver, NO leading v (e.g. 1.0.1)"
+        required: true
+        type: string
+      message:
+        description: "Annotation for the tag"
+        required: false
+        default: "cassyx release"
+        type: string
+
+concurrency:
+  group: tag-release
+  cancel-in-progress: false
+
+permissions: {}
+
+env:
+  CASSYX_NO_OPEN: "1"
+  DOCKER_BUILDKIT: "1"
+
+jobs:
+  tag:
+    name: verify · then tag
+    runs-on: ubuntu-latest
+    # `make release-local` builds the backend image, which runs the whole Maven
+    # reactor inside the image (§2.2). amd64 only (see the build step), so this
+    # is a normal build rather than an emulated one.
+    timeout-minutes: 90
+    permissions:
+      contents: write # create and push the tag
+    steps:
+      # RELEASE_TOKEN when it exists - see the "Push the tag" step for why this
+      # is not a preference but the difference between a release happening and
+      # appearing to happen.
+      - uses: actions/checkout@v7
+        with:
+          # Tags are needed for the existence check below, and the annotated tag
+          # must be created on the real commit, not a graft.
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+
+      # -----------------------------------------------------------------------
+      # 1. main only.
+      # Releases are cut from main because that is the ref branch protection and
+      # the full CI suite apply to. A tag cut from a topic branch would publish
+      # code that no required check ever saw.
+      # -----------------------------------------------------------------------
+      - name: Refuse to run outside main
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF}" != "refs/heads/main" ]; then
+            echo "::error::tag-release must be dispatched against main, not '${GITHUB_REF#refs/heads/}'. Releases are only cut from the branch the required checks protect."
+            exit 1
+          fi
+
+      - name: Validate the version
+        id: v
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ "$VERSION" =~ ^v ]]; then
+            echo "::error::'$VERSION' has a leading v. Pass the BARE version (${VERSION#v}) - this workflow adds the v when it creates the tag."
+            exit 1
+          fi
+          # Same expression as prepare-release.yml, on purpose: a version this
+          # workflow would refuse to tag must never have reached a pom.
+          if [[ ! "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+            echo "::error::'$VERSION' is not bare semver. Expected MAJOR.MINOR.PATCH with optional -prerelease, e.g. 1.0.1 or 1.1.0-rc1."
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+      # -----------------------------------------------------------------------
+      # 2. The pom must ALREADY say this. This workflow does not bump anything:
+      # if it did, the version change would reach main without a PR and without
+      # CI, which is exactly what prepare-release exists to avoid.
+      # -----------------------------------------------------------------------
+      - name: Assert backend/pom.xml is already at this version
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          set -euo pipefail
+          pom="$(bash scripts/release-version.sh)"
+          if [ "$pom" != "$VERSION" ]; then
+            echo "::error::backend/pom.xml says '$pom', you asked to tag '$VERSION'. Run the prepare-release workflow with version $VERSION, merge the PR it opens, then run this again."
+            exit 1
+          fi
+          # The same assertion release.yml's guard job will make, in the same
+          # form, so a difference in how the tag is normalised cannot hide here.
+          bash scripts/release-version.sh "v$VERSION" >/dev/null
+
+      # -----------------------------------------------------------------------
+      # 3. A version number is used once. Re-tagging an existing version moves a
+      # ref that customers may already have pulled by digest.
+      # -----------------------------------------------------------------------
+      - name: Assert the tag does not exist
+        env:
+          TAG: ${{ steps.v.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "::error::tag $TAG already exists locally. $TAG has already been cut - pick the next version."
+            exit 1
+          fi
+          # Checked separately from the local ref: a tag can exist on the remote
+          # and not here (another maintainer, or a run that pushed and then
+          # failed), and that case is the dangerous one.
+          if [ -n "$(git ls-remote --tags origin "refs/tags/$TAG")" ]; then
+            echo "::error::tag $TAG already exists on the remote. Deleting a published tag is not a normal operation - pick the next version instead."
+            exit 1
+          fi
+          echo "$TAG is free"
+
+      # =======================================================================
+      # 4. VERIFY - the whole reason this workflow is not just `git tag`.
+      # =======================================================================
+      - name: Bootstrap .env
+        # Copied from the committed example, exactly as ci.yml does, so a broken
+        # example fails here rather than on a customer's first install.
+        run: cp .env.example .env
+
+      # `make release-local`, not a reimplementation of it: the maintainer can
+      # run the identical sequence on a laptop, and there is no second copy to
+      # drift. It builds both images with --load, boots
+      # docker-compose.release.yml (the file customers download, not the dev
+      # one), waits for health and runs scripts/smoke.sh. TAG= makes it re-run
+      # the tag/pom guard internally too.
+      #
+      # HOST ARCHITECTURE ONLY, i.e. linux/amd64 on a GitHub runner. Deliberate.
+      # The arm64 leg builds the entire Maven reactor under QEMU and takes ~25
+      # minutes, and release.yml builds and publishes both architectures properly
+      # right after this tag lands. Paying that cost twice would double the
+      # release wall-clock to prove something the next workflow proves anyway.
+      # What is at risk here is "do these images boot and serve", which is not
+      # architecture-specific.
+      - name: Build, boot and smoke the release stack (amd64)
+        env:
+          TAG_ARG: ${{ steps.v.outputs.tag }}
+        run: make release-local TAG="$TAG_ARG"
+
+      # release-local leaves the stack running on purpose. Re-running smoke
+      # against it costs seconds and adds the release-specific expectations that
+      # the generic target does not carry.
+      #
+      # CASSYX_SMOKE_EXPECT_LICENSABLE is wired here the same way release.yml
+      # wires CASSYX_BYPASS_PROFILE ahead of the branch that consumes it:
+      # scripts/smoke.sh reads CASSYX_SMOKE_EXPECT_VERSION today but does not yet
+      # read this one, so it is currently inert and asserts nothing. It is set
+      # now so the check takes effect the moment smoke.sh grows it, rather than
+      # being one forgotten edit away. Do not read a passing run as proof the
+      # licence surface was checked - the /api/license state assertion in
+      # smoke.sh is what covers that today.
+      - name: Smoke with the release expectations
+        env:
+          CASSYX_SMOKE_API: http://localhost:8081
+          CASSYX_SMOKE_WEB: http://localhost:8080
+          CASSYX_SMOKE_EXPECT_VERSION: ${{ steps.v.outputs.version }}
+          CASSYX_SMOKE_EXPECT_LICENSABLE: "true"
+        run: bash scripts/smoke.sh
+
+      - name: Stack logs on failure
+        if: failure()
+        timeout-minutes: 2
+        env:
+          # docker-compose.release.yml declares CASSYX_SECRET_KEY with `:?`, so
+          # compose refuses to interpolate the file at all without it - even to
+          # read logs. `make release-down` passes the same placeholder.
+          CASSYX_SECRET_KEY: unused
+        run: docker compose -f docker-compose.release.yml logs --tail=200 || true
+
+      # =======================================================================
+      # 5. TAG - reached only because everything above passed.
+      # =======================================================================
+      - name: Create the annotated tag
+        env:
+          TAG: ${{ steps.v.outputs.tag }}
+          MESSAGE: ${{ inputs.message }}
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name  "cassyx-release"
+          git config user.email "release@users.noreply.github.com"
+          # Annotated, not lightweight: the tag object carries who cut the
+          # release and when, and release.yml's generated notes read the history
+          # between annotated tags.
+          git tag -a "$TAG" -m "$MESSAGE $VERSION"
+
+      # -----------------------------------------------------------------------
+      # THE TRAP.
+      #
+      # GitHub refuses to start workflows from events created with GITHUB_TOKEN.
+      # It is a recursion guard and it is not configurable. So a tag pushed with
+      # GITHUB_TOKEN lands, looks completely normal, and release.yml never runs -
+      # no images, no GitHub Release, and no failure anywhere to notice.
+      #
+      # With RELEASE_TOKEN (a PAT with `contents: write`) the push is attributed
+      # to a user and release.yml starts on its own, which is the intended path.
+      # Without it the tag is still pushed - refusing would be worse - but the
+      # run shouts about it here and in the job summary, with the exact recovery
+      # command. Setup: docs/sell-next-steps.md §4.1.
+      #
+      # That recovery is a delete-and-repush from a machine with the maintainer's
+      # own credentials, NOT `gh workflow run release.yml`: a workflow_dispatch of
+      # release.yml is defined as a DRY RUN (it sets PUSH=false and publishes
+      # nothing), so dispatching it would produce a green run and still no
+      # release. Only a real tag-push event releases. Deleting and re-pushing is
+      # safe here precisely because nothing has been published yet - the same
+      # ref, the same commit, just an event GitHub is willing to act on.
+      # -----------------------------------------------------------------------
+      - name: Push the tag
+        id: push
+        env:
+          TAG: ${{ steps.v.outputs.tag }}
+          HAS_PAT: ${{ secrets.RELEASE_TOKEN != '' }}
+        run: |
+          set -euo pipefail
+          git push origin "$TAG"
+          if [ "$HAS_PAT" = "true" ]; then
+            echo "pushed $TAG with RELEASE_TOKEN - release.yml will start on its own"
+          else
+            echo "::warning title=release.yml will NOT start automatically::$TAG was pushed with GITHUB_TOKEN, and GitHub does not trigger workflows from GITHUB_TOKEN events. Re-push the tag from your own machine to start the release: git fetch --tags && git push --delete origin $TAG && git push origin $TAG"
+            # Repeated on stdout in colour: a ::warning:: annotation is easy to
+            # scroll past, and the failure mode of missing it is a version number
+            # that is tagged but never released.
+            printf '\n\033[31m================================================================\n'
+            printf '  %s IS TAGGED BUT NO RELEASE IS RUNNING.\n' "$TAG"
+            printf '  Set the RELEASE_TOKEN secret, then re-push the tag from a\n'
+            printf '  machine using your own credentials:\n'
+            printf '    git fetch --tags\n'
+            printf '    git push --delete origin %s\n' "$TAG"
+            printf '    git push origin %s\n' "$TAG"
+            printf '  Do NOT use "gh workflow run release.yml": a dispatch of that\n'
+            printf '  workflow is a dry run and publishes nothing.\n'
+            printf '================================================================\033[0m\n\n'
+          fi
+
+      - name: Tear down the verification stack
+        if: always()
+        run: make release-down || true
+
+      - name: Summary
+        if: always()
+        env:
+          TAG: ${{ steps.v.outputs.tag }}
+          PUSHED: ${{ steps.push.outcome }}
+          HAS_PAT: ${{ secrets.RELEASE_TOKEN != '' }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### tag-release \`${TAG}\`"
+            echo ""
+            if [ "$PUSHED" != "success" ]; then
+              echo "**Not tagged.** Verification did not pass, so no public ref was created."
+              echo "Nothing needs undoing."
+            elif [ "$HAS_PAT" = "true" ]; then
+              echo "Tagged and pushed with \`RELEASE_TOKEN\`."
+              echo "The \`release\` workflow starts automatically: <https://github.com/${REPO}/actions/workflows/release.yml>"
+            else
+              echo "Tagged and pushed with \`GITHUB_TOKEN\`."
+              echo ""
+              echo "> **The \`release\` workflow will NOT start.** GitHub does not trigger"
+              echo "> workflows from events created with \`GITHUB_TOKEN\`. \`${TAG}\` exists, but"
+              echo "> nothing is building, nothing is being pushed to GHCR, and no GitHub"
+              echo "> Release will appear until a REAL tag push happens. Re-push \`${TAG}\`"
+              echo "> from a machine using your own credentials:"
+              echo ">"
+              echo "> \`\`\`bash"
+              echo "> git fetch --tags"
+              echo "> git push --delete origin ${TAG}"
+              echo "> git push origin ${TAG}"
+              echo "> \`\`\`"
+              echo ">"
+              echo "> Do **not** use \`gh workflow run release.yml\` or Actions -> release ->"
+              echo "> Run workflow: a \`workflow_dispatch\` of \`release\` is a dry run by design"
+              echo "> (\`PUSH\` is false), so it goes green and publishes nothing."
+              echo ">"
+              echo "> Configure a \`RELEASE_TOKEN\` secret to make this automatic - see"
+              echo "> docs/sell-next-steps.md §4.1."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

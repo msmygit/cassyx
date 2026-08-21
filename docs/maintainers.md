@@ -316,21 +316,38 @@ wrong major. Check it any time with `make release-version TAG=v1.2.3`.
 The commercial half of a release (pricing decisions, GHCR visibility, the end-to-end payment test)
 is in [`docs/sell-next-steps.md`](sell-next-steps.md) §4 and is not repeated here.
 
-1. **Bump the reactor version.** `backend/pom.xml` `<version>`, plus every module's
-   `<parent><version>`. Bumping the *major* is a pricing decision, not a version bump: see
-   sell-next-steps §4, item 2.
-2. **Prove it locally.** `make release-local` builds both images, runs `docker-compose.release.yml`
-   and smokes it, which is the same sequence the workflow runs minus the push. `make release-down`
-   afterwards.
-3. **PR to `main` and let CI go green there.** Tags are cut from `main` precisely because it has
-   already passed the full per-PR suite; the release workflow does not re-run tests.
-4. **Tag the merge commit and push it.**
+Steps 1 to 4 are workflows you dispatch from the **Actions** tab. Nothing needs a terminal until
+the verification in step 6, which deliberately does.
 
-   ```bash
-   git switch main && git pull
-   git tag -a v1.2.3 -m "cassyx 1.2.3"
-   git push origin v1.2.3
-   ```
+1. **Actions → "Prepare release" → Run workflow**, entering a bare version (`1.2.3`, no leading
+   `v`; the tag carries the `v`, the pom does not).
+
+   It sets the version across **all eight** poms, verifies they agree, confirms
+   `scripts/release-version.sh` reports it, proves the tree still builds, and opens a PR.
+
+   Eight, not seven: `licensing/` sits outside the reactor behind a profile and carries its own
+   `<parent><version>`, so a plain `versions:set` in `backend/` misses it. That is not
+   hypothetical - it is what happened at 1.0.0, where `licensing/pom.xml` stayed at
+   `0.1.0-SNAPSHOT` and the module only built because a stale parent was cached locally.
+
+   Bumping the *major* is a pricing decision rather than a version bump: see sell-next-steps §4.
+
+2. **Review and merge that PR.** The bump goes through review like any other change; the workflow
+   never pushes to `main`.
+
+3. **Actions → "Tag release" → Run workflow**, same version plus an annotation message.
+
+   It refuses unless it is on `main` and the pom already matches, checks the tag is free locally
+   and remotely, then **builds the images, boots the release stack and smokes it - and only tags if
+   that passes.**
+
+   That ordering is the point of the workflow. A tag is public the moment it is pushed, and a
+   release that fails afterwards leaves a tag pointing at nothing. Verifying first means the tag is
+   only ever created for a build already known to work.
+
+4. **`release.yml` starts automatically** on the tag push and does the real multi-arch build,
+   smoke and publish. This requires `RELEASE_TOKEN`; see below, because without it this step
+   silently does not happen.
 
 5. **Watch the `release` workflow.** A failure before the push step means nothing was published,
    which is the intended outcome: fix, delete the tag, re-tag.
@@ -360,6 +377,49 @@ is in [`docs/sell-next-steps.md`](sell-next-steps.md) §4 and is not repeated he
 > the release on exactly this (see the `fix/bake-public-key` branch; confirm it is on `main` and
 > wired into the release smoke step before relying on it). Either way, step 8 stays manual: **look
 > at the screen a paying customer will see, and check it asks for a key.**
+
+---
+
+### `RELEASE_TOKEN` - without it, tagging looks like it worked and nothing releases
+
+**GitHub does not start workflows from events created with `GITHUB_TOKEN`.** It is a recursion
+guard and it cannot be turned off. So a tag pushed by `tag-release` using the default token lands
+normally, the run goes green, and `release.yml` never fires: no images, no GitHub Release, and
+nothing anywhere reporting a failure.
+
+Both release workflows therefore prefer a `RELEASE_TOKEN` secret and fall back to `GITHUB_TOKEN`
+with a loud warning in the log and in the job summary.
+
+**Setting it up** (once, five minutes):
+
+1. GitHub → your avatar → Settings → Developer settings → Personal access tokens →
+   **Fine-grained tokens** → Generate new token.
+2. Repository access: **Only select repositories** → this repository.
+3. Repository permissions: **Contents: Read and write** (this is what pushes tags and branches) and
+   **Pull requests: Read and write** (so `prepare-release` can open its PR).
+4. Set an expiry you will actually notice, and put a calendar reminder on it. An expired
+   `RELEASE_TOKEN` degrades silently to the `GITHUB_TOKEN` path.
+5. Copy the token, then in the repository: Settings → Secrets and variables → **Actions** →
+   New repository secret, named exactly **`RELEASE_TOKEN`**.
+
+**If it is missing:** the tag is still pushed (refusing would be worse), but you must re-push it
+from a machine using your own credentials to produce an event GitHub will act on:
+
+```bash
+git fetch --tags
+git push --delete origin v1.0.1
+git push origin v1.0.1
+```
+
+Safe at that point precisely because nothing has been published yet: same ref, same commit.
+
+Do **not** reach for `gh workflow run release.yml --ref v1.0.1` instead. A `workflow_dispatch` of
+`release` is a **dry run by design** (it sets `PUSH=false`), so it builds, smokes, goes green and
+publishes nothing - the most convincing way possible to not release.
+
+The same suppression applies to the PR `prepare-release` opens: without `RELEASE_TOKEN`, `ci` will
+not run on it. Close and reopen the PR in the UI, or push any commit to its branch, to make the
+checks appear.
 
 ---
 
