@@ -71,7 +71,7 @@ module_contract() {
     backend)  echo "  multi-stage Dockerfile (maven build -> JRE 21), listens :8080, GET /api/health" ;;
     frontend) echo "  multi-stage Dockerfile (node build -> nginx), listens :8080, /healthz, /api -> cassyx-api:8080" ;;
     e2e)      echo "  package.json with a 'test' script and @playwright/test installed" ;;
-    *)        echo "  see README.md § Build contracts" ;;
+    *)        echo "  see docs/maintainers.md § Build contracts" ;;
   esac
 }
 

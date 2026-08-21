@@ -154,10 +154,21 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
             type=raw,value=dryrun,enable=${{ github.event_name == 'workflow_dispatch' }}
+          # These labels are what a prospective customer reads on the GHCR package
+          # page, so they are written for someone arriving cold with no idea what
+          # cassyx is. They are also the only description we control once this
+          # repository goes private: the package page's README comes from the
+          # linked repository, and a private repository has none to render.
+          # `documentation` therefore points at a release asset URL rather than a
+          # blob on a branch, because release assets stay publicly readable.
           labels: |
-            org.opencontainers.image.title=cassyx backend
-            org.opencontainers.image.description=cassyx - self-hosted Cassandra/DSE/Astra data manager (API and engine)
-            org.opencontainers.image.licenses=Elastic-2.0
+            org.opencontainers.image.title=cassyx backend (API and bulk engine)
+            org.opencontainers.image.description=cassyx is a self-hosted CQL IDE, data manager and bulk data mover for Apache Cassandra, DSE, Astra DB, Amazon Keyspaces and ScyllaDB, with first-class vector/SAI/ANN support. Runs entirely on your infrastructure - no telemetry, no data leaves your network, licence verification is offline. This image is the backend; pair it with cassyx-frontend using docker-compose.release.yml. A licence key is required; free site licences are issued on request for CI, evaluation and enterprise self-hosting.
+            org.opencontainers.image.licenses=LicenseRef-Elastic-License-2.0
+            org.opencontainers.image.url=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.documentation=${{ github.server_url }}/${{ github.repository }}/releases/latest
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.vendor=cassyx
             org.opencontainers.image.version=${{ env.VERSION }}
 
       - name: Image metadata (frontend)
@@ -177,10 +188,15 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
             type=raw,value=dryrun,enable=${{ github.event_name == 'workflow_dispatch' }}
+          # Same reasoning as the backend labels above.
           labels: |
-            org.opencontainers.image.title=cassyx frontend
-            org.opencontainers.image.description=cassyx - self-hosted Cassandra/DSE/Astra data manager (web UI)
-            org.opencontainers.image.licenses=Elastic-2.0
+            org.opencontainers.image.title=cassyx frontend (web UI)
+            org.opencontainers.image.description=cassyx is a self-hosted CQL IDE, data manager and bulk data mover for Apache Cassandra, DSE, Astra DB, Amazon Keyspaces and ScyllaDB, with first-class vector/SAI/ANN support. Runs entirely on your infrastructure - no telemetry, no data leaves your network, licence verification is offline. This image is the web UI; pair it with cassyx-backend using docker-compose.release.yml. A licence key is required; free site licences are issued on request for CI, evaluation and enterprise self-hosting.
+            org.opencontainers.image.licenses=LicenseRef-Elastic-License-2.0
+            org.opencontainers.image.url=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.documentation=${{ github.server_url }}/${{ github.repository }}/releases/latest
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.vendor=cassyx
             org.opencontainers.image.version=${{ env.VERSION }}
 
       # =======================================================================
@@ -199,13 +215,9 @@ jobs:
           # unlocked by setting CASSYX_LICENSE_ENFORCE=false - which is the whole
           # difference between selling the product and giving it away. Passed
           # explicitly rather than relying on the Dockerfile default, because a
-          # default that silently changes is not a control.
-          #
-          # NOTE: this ARG arrives with the feat/site-licence branch. Until that
-          # merges, backend/Dockerfile declares no such ARG and it is simply
-          # ignored (verified locally: buildx does not even warn, and the build
-          # exits 0). Wiring it now means the release pipeline is correct the
-          # moment the branch lands rather than one forgotten edit later.
+          # default that silently changes is not a control. backend/Dockerfile
+          # declares the ARG (defaulting to `release`); docs/maintainers.md
+          # documents the profile split.
           build-args: |
             CASSYX_BYPASS_PROFILE=release
           cache-from: type=gha,scope=backend

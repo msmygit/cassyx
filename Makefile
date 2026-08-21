@@ -350,7 +350,7 @@ nuke: down ## down + prune dangling cassyx images
 	@docker image prune -f --filter label=com.docker.compose.project=$${COMPOSE_PROJECT_NAME:-cassyx} || true
 
 show-contracts: ## Print the build contract other workstreams must satisfy
-	@awk '/^## Build contracts/{f=1} f && /^## / && !/^## Build contracts/{exit} f' $(ROOT)/README.md
+	@awk '/^## Build contracts/{f=1} f && /^## / && !/^## Build contracts/{exit} f' $(ROOT)/docs/maintainers.md
 
 # Graceful degradation while backend/ and frontend/ are still being written.
 # Image-level checks (needed to run the stack)
