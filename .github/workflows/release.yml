@@ -259,12 +259,17 @@ jobs:
 
       # The same script `make smoke` and the CI smoke job run - one gate, not a
       # second implementation that can drift from it. The extra expectation is
-      # release-specific: the built artefact must report the tagged version.
+      # Release-specific assertions, both about the BUILT ARTEFACT rather than the source:
+      #   EXPECT_VERSION     the image reports the version the tag promises
+      #   EXPECT_LICENSABLE  the image can verify a licence at all. 1.0.0 shipped with the public
+      #                      key left as "PLACEHOLDER", so no key could ever unlock it, and every
+      #                      other check in this job passed while it did.
       - name: Smoke the release stack
         env:
           CASSYX_SMOKE_API: http://localhost:8081
           CASSYX_SMOKE_WEB: http://localhost:8080
           CASSYX_SMOKE_EXPECT_VERSION: ${{ env.VERSION }}
+          CASSYX_SMOKE_EXPECT_LICENSABLE: "1"
         run: bash scripts/smoke.sh
 
       - name: Stack logs on failure
