@@ -176,14 +176,14 @@ jobs:
       # against it costs seconds and adds the release-specific expectations that
       # the generic target does not carry.
       #
-      # CASSYX_SMOKE_EXPECT_LICENSABLE is wired here the same way release.yml
-      # wires CASSYX_BYPASS_PROFILE ahead of the branch that consumes it:
-      # scripts/smoke.sh reads CASSYX_SMOKE_EXPECT_VERSION today but does not yet
-      # read this one, so it is currently inert and asserts nothing. It is set
-      # now so the check takes effect the moment smoke.sh grows it, rather than
-      # being one forgotten edit away. Do not read a passing run as proof the
-      # licence surface was checked - the /api/license state assertion in
-      # smoke.sh is what covers that today.
+      # CASSYX_SMOKE_EXPECT_LICENSABLE asserts the built image can verify a
+      # licence AT ALL. With no CASSYX_LICENSE_KEY set, a correct image reports
+      # ABSENT ("no key supplied"); MALFORMED means the SERVER cannot verify,
+      # which is an operator fault and exactly what 1.0.0 shipped - its public
+      # key was left as the literal PLACEHOLDER, so no key anyone minted could
+      # ever have unlocked it, and every other check in the release passed while
+      # that was true. Tagging a build with that defect is the specific mistake
+      # this step exists to make impossible.
       - name: Smoke with the release expectations
         env:
           CASSYX_SMOKE_API: http://localhost:8081
