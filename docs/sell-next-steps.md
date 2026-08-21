@@ -3,8 +3,9 @@
 Everything between "the code works" and "money arrives and a customer has a working install".
 
 This is the **commercial** runbook. It deliberately does not repeat what is already in
-[`README.md`](../README.md) (how a user installs a release, how a maintainer cuts one) or
-[`docs/plan.md`](plan.md) §9 (why the licensing model is shaped this way). It links to both.
+[`README.md`](../README.md) (how a customer installs and activates a release),
+[`docs/maintainers.md`](maintainers.md) (how a maintainer builds and cuts one) or
+[`docs/plan.md`](plan.md) §9 (why the licensing model is shaped this way). It links to all three.
 
 > **Read §0 first.** Two defaults will quietly cost you money if you ship without changing them.
 
@@ -207,8 +208,8 @@ If that returns `200`, you built the image with the `dev` profile and are giving
 
 ## 4. How to cut a release
 
-The mechanics are in [README → Cutting a release](../README.md#cutting-a-release-maintainers).
-The commercial additions:
+The mechanics, and the step-by-step checklist, are in
+[maintainers → Cutting a release](maintainers.md#cutting-a-release). The commercial additions:
 
 1. **The tag must equal `<version>` in `backend/pom.xml`.** The `guard` job enforces it. This is a
    licensing correctness rule, not tidiness: the running version is what `scope` is checked
@@ -259,7 +260,13 @@ the service config. See §7.
 Mint a key with `edition: site` (plan §9.2). Unlimited seats, verified by exactly the same code as
 a paid key, badged in the UI as granted rather than bypassed. This is the supported way to run
 unlocked and it replaced the old free `CASSYX_LICENSE_ENFORCE=false` unlock, which is now inert in
-release builds.
+release builds ([maintainers → Licence
+enforcement](maintainers.md#licence-enforcement-how-the-build-decides-92)).
+
+`README.md` advertises this as "free site licences on request for CI, evaluation and enterprise
+self-hosting" and gives no other route to an unlocked instance. **Answer those requests.** The
+request path is the replacement for a flag people used to be able to set themselves; if it goes
+unanswered, the practical outcome is a rebuild from source, not a sale.
 
 ### 5.5 Trials
 
