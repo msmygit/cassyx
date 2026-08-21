@@ -26,7 +26,15 @@ import org.springframework.test.web.servlet.MockMvc;
  */
 class LicenseGateWiringTest {
 
-  /** The shipped default: enforcement on, no key, placeholder public key. */
+  /**
+   * The shipped default: enforcement on, a real embedded public key, and no licence key supplied.
+   *
+   * <p>This is what a customer sees on first run, so the expected state is {@code ABSENT} ("no key
+   * supplied, offer a trial"). It used to be {@code MALFORMED}, because the public key defaulted to
+   * the literal {@code PLACEHOLDER} and the shipped image could verify nothing at all. These tests
+   * asserted that as correct behaviour and so could not fail when 1.0.0 shipped unable to accept
+   * any licence. See {@link Misconfigured} for the operator-fault case they were really describing.
+   */
   @Nested
   @SpringBootTest
   @AutoConfigureMockMvc
@@ -53,7 +61,7 @@ class LicenseGateWiringTest {
           .perform(get("/api/connections"))
           .andExpect(status().isPaymentRequired())
           .andExpect(content().contentTypeCompatibleWith("application/problem+json"))
-          .andExpect(jsonPath("$.state").value("MALFORMED"))
+          .andExpect(jsonPath("$.state").value("ABSENT"))
           .andExpect(jsonPath("$.title").value("License required"));
     }
 
@@ -63,12 +71,59 @@ class LicenseGateWiringTest {
     }
 
     @Test
-    void licenceStaysReachableSoAConfigGapIsDiagnosable() throws Exception {
-      // An unusable public key must be reportable, not silent - this is the endpoint that says so.
+    void licenceStaysReachableSoTheAbsenceOfAKeyIsReportable() throws Exception {
+      // Ungated so the UI can render its activation screen (plan section 9.1). ABSENT rather than
+      // MALFORMED: the server can verify perfectly well, the customer simply has not bought yet.
       mockMvc
           .perform(get("/api/license"))
           .andExpect(status().isOk())
           .andExpect(jsonPath("$.licensed").value(false))
+          .andExpect(jsonPath("$.state").value("ABSENT"));
+    }
+  }
+
+  /**
+   * The operator fault: enforcement on, but the embedded public key is unusable, so the server can
+   * verify NOTHING and no licence anyone mints will ever unlock it.
+   *
+   * <p>This is exactly what shipped in 1.0.0, and it is a different failure from {@link Locked}:
+   * there the customer needs to buy a key, here the customer can do nothing at all and the operator
+   * must fix the deployment. The frontend renders different screens for the two, and the release
+   * smoke check ({@code CASSYX_SMOKE_EXPECT_LICENSABLE}) fails the build on this one, so the
+   * distinction has to keep working.
+   *
+   * <p>The public key is overridden here deliberately. It cannot be reached by configuration in
+   * {@link Locked} any more, and folding the two cases together is what let the real bug through.
+   */
+  @Nested
+  @SpringBootTest
+  @AutoConfigureMockMvc
+  @TestPropertySource(
+      properties = {
+        "spring.datasource.url=jdbc:h2:mem:cassyx-gate-misconfigured;DB_CLOSE_DELAY=-1",
+        "cassyx.license.enforce=true",
+        "cassyx.license.key=",
+        "cassyx.license.public-key=PLACEHOLDER"
+      })
+  class Misconfigured {
+
+    @Autowired private MockMvc mockMvc;
+
+    @Test
+    void licenceReportsTheConfigGapRatherThanBlamingTheBuyer() throws Exception {
+      mockMvc
+          .perform(get("/api/license"))
+          .andExpect(status().isOk())
+          .andExpect(jsonPath("$.licensed").value(false))
+          .andExpect(jsonPath("$.state").value("MALFORMED"));
+    }
+
+    @Test
+    void gatedPathsAreStillRefused() throws Exception {
+      // Failing closed matters most precisely when the deployment is broken.
+      mockMvc
+          .perform(get("/api/connections"))
+          .andExpect(status().isPaymentRequired())
           .andExpect(jsonPath("$.state").value("MALFORMED"));
     }
   }
