@@ -186,8 +186,15 @@ lint-frontend: check-frontend-src
 
 mutation: check-backend-src ## PIT mutation testing on cassyx-core + cassyx-bulk (nightly; 70% gate)
 	$(call say,PIT mutation testing — core + bulk only (§11.1))
+	@# test-compile is required, not optional. mutationCoverage is a STANDALONE goal, so Maven
+	@# runs no lifecycle phase ahead of it and neither main nor test classes are compiled. PIT then
+	@# scans an empty target/classes and fails with a message that sounds like a config problem:
+	@#   No mutations found. This probably means there is an issue with either the supplied
+	@#   classpath or filters.
+	@# The filters are fine; there was simply nothing to mutate. Same failure mode as the CVE scan
+	@# needing an install pass ahead of dependency-check.
 	@$(DC_TOOLS) run --rm --no-deps maven -B -ntp -pl cassyx-core,cassyx-bulk \
-	    org.pitest:pitest-maven:mutationCoverage
+	    test-compile org.pitest:pitest-maven:mutationCoverage
 
 # -----------------------------------------------------------------------------
 # Security, split by CADENCE rather than lumped together.

@@ -60,13 +60,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # `slug` exists only because artifact names cannot contain the `*` in "C*". Uploading
+        # `compat-C* 3.11` fails the step outright:
+        #   The artifact name is not valid: compat-C* 3.11. Contains the following character:
+        #   Asterisk *
+        # `label` stays human-readable for the job name, which has no such restriction.
         target:
-          - { label: "C* 3.11",     image: "cassandra:3.11" }
-          - { label: "C* 4.1",      image: "cassandra:4.1" }
-          - { label: "C* 5.0",      image: "cassandra:5.0" }
-          - { label: "ScyllaDB 6.2", image: "scylladb/scylla:6.2" }
+          - { label: "C* 3.11",      slug: "cassandra-3.11",  image: "cassandra:3.11" }
+          - { label: "C* 4.1",       slug: "cassandra-4.1",   image: "cassandra:4.1" }
+          - { label: "C* 5.0",       slug: "cassandra-5.0",   image: "cassandra:5.0" }
+          - { label: "ScyllaDB 6.2", slug: "scylladb-6.2",    image: "scylladb/scylla:6.2" }
           # DSE 6.8 requires a licensed image + registry credentials:
-          # - { label: "DSE 6.8",  image: "datastax/dse-server:6.8.44" }
+          # - { label: "DSE 6.8",    slug: "dse-6.8",         image: "datastax/dse-server:6.8.44" }
     steps:
       - uses: actions/checkout@v7
       - run: cp .env.example .env
@@ -75,7 +80,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: compat-${{ matrix.target.label }}
+          name: compat-${{ matrix.target.slug }}
           path: bench/compat-results.txt
           if-no-files-found: ignore
 
