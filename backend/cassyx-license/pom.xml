@@ -6,7 +6,7 @@
   <parent>
     <groupId>io.cassyx</groupId>
     <artifactId>cassyx-parent</artifactId>
-    <version>1.0.0</version>
+    <version>1.0.1</version>
   </parent>
   <artifactId>cassyx-license</artifactId>
   <name>cassyx-license</name>

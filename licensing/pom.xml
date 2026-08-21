@@ -6,7 +6,7 @@
   <parent>
     <groupId>io.cassyx</groupId>
     <artifactId>cassyx-parent</artifactId>
-    <version>1.0.0</version>
+    <version>1.0.1</version>
     <!-- The reactor lives in backend/; this module deliberately sits outside it. See the
          `licensing` profile in backend/pom.xml for why. -->
     <relativePath>../backend/pom.xml</relativePath>
