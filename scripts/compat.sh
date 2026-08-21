@@ -87,12 +87,28 @@ log "results written to $RESULTS"
 cat "$RESULTS"
 
 # Backend capability-probe integration tests, when that workstream has landed.
-if [ -f "$ROOT/backend/pom.xml" ]; then
-  log "running backend capability tests (ClusterCapabilities probe, §7.1)"
-  docker compose -f "$ROOT/docker-compose.yml" --profile tools run --rm --no-deps maven \
-    -B -ntp verify -Dgroups=compat || FAILED=1
-else
+#
+# The check below is not ceremony. `mvn verify -Dgroups=compat` against a tag that nothing carries
+# runs ZERO tests and then dies on cassyx-core's JaCoCo gate ("Coverage checks have not been met"),
+# because zero tests produce zero coverage. That failure names JaCoCo and says nothing about the
+# real problem, so the nightly has been reporting a coverage error every night for a situation that
+# is actually "the §7.1 probe tests were never written".
+#
+# Fail loudly and accurately instead. Anything else is worse: making this green would mean a
+# compatibility matrix that reports success while testing nothing at all, across five targets.
+if [ ! -f "$ROOT/backend/pom.xml" ]; then
   log "backend/ absent — ClusterCapabilities probe tests skipped"
+elif ! grep -rq '@Tag("compat")' "$ROOT/backend" --include='*.java' 2>/dev/null; then
+  log "NO capability-probe tests exist yet (nothing carries @Tag(\"compat\"))."
+  log "  The §7.1 capability matrix is unverified: this job cannot pass until those tests exist."
+  log "  See docs/plan.md §7.1 and §11.3. Raw CQL probe results above are still valid."
+  FAILED=1
+else
+  log "running backend capability tests (ClusterCapabilities probe, §7.1)"
+  # Coverage is deliberately skipped: this run exists to probe a cluster, not to measure coverage,
+  # and a tag-filtered subset can never satisfy a whole-module line gate.
+  docker compose -f "$ROOT/docker-compose.yml" --profile tools run --rm --no-deps maven \
+    -B -ntp verify -Dgroups=compat -Dcassyx.coverage.skip=true || FAILED=1
 fi
 
 exit "$FAILED"
