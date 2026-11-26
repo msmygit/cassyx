@@ -41,3 +41,4 @@ timestamp,git_sha,benchmark,variant,rows,metric,value,unit,notes
 2026-11-21T10:30:51Z,be43738,memory,backend,10000000,rss,338.2,MiB,sampled post-unload
 2026-11-22T10:33:55Z,29e322e,memory,backend,10000000,rss,325.9,MiB,sampled post-unload
 2026-11-24T13:09:03Z,d250dbd,memory,backend,10000000,rss,326.9,MiB,sampled post-unload
+2026-11-26T11:45:51Z,49dbcf2,memory,backend,10000000,rss,327.7,MiB,sampled post-unload
